@@ -10,7 +10,7 @@ const HEIGHT = 800;
 const MOBILE_WIDTH = 390;
 const MOBILE_HEIGHT = 844;
 const BIG_WIDTH = 1920;
-const BIG_HEIGHT = 1440;
+const BIG_HEIGHT = 1080;
 
 app.get("/", (req, res) => {
   res.send(`<!DOCTYPE html>
