@@ -1,10 +1,14 @@
 const express = require("express");
+const path = require("path");
 const puppeteer = require("puppeteer");
 const archiver = require("archiver");
 
 const app = express();
 const PORT = 3131;
 const BROWSER_ARGS = ["--no-sandbox", "--disable-setuid-sandbox"];
+const BASE_URL = "https://click.grj.se";
+
+app.use(express.static(path.join(__dirname, "public")));
 
 const ANALYTICS = `
   <script async src="https://s.grj.se/js/pa-aExm7a8ErYTh7VPXLbZz7.js"></script>
@@ -16,17 +20,21 @@ const STYLE = `
   .container { text-align: center; width: 600px; }
   h1 { margin-bottom: 1.5rem; font-weight: 300; font-size: 2rem; }
   form { display: flex; gap: 0.5rem; }
-  input { flex: 1; padding: 0.75rem 1rem; border-radius: 8px; border: 1px solid #333; background: #16213e; color: #eee; font-size: 1rem; outline: none; }
-  input:focus { border-color: #0f3460; }
+  label { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); border: 0; }
+  input { flex: 1; padding: 0.75rem 1rem; border-radius: 8px; border: 1px solid #333; background: #16213e; color: #eee; font-size: 1rem; }
+  input:focus { border-color: #5b8ad0; outline: 2px solid #5b8ad0; outline-offset: 1px; }
   button { padding: 0.75rem 1.5rem; border-radius: 8px; border: none; background: #e94560; color: #fff; font-size: 1rem; cursor: pointer; }
   button:hover { background: #c73652; }
+  button:focus-visible { outline: 2px solid #5b8ad0; outline-offset: 2px; }
   button:disabled { opacity: 0.5; cursor: wait; }
   .status { margin-top: 1rem; min-height: 1.5rem; color: #aaa; }
   .preview { margin-top: 1.5rem; }
   .preview img { border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.4); }
-  .download { display: inline-block; margin-top: 1rem; color: #e94560; text-decoration: none; font-weight: 500; }
-  .links { margin-top: 2rem; }
-  .links a { color: #aaa; text-decoration: none; }`;
+  .download { display: inline-block; margin-top: 1rem; color: #f06680; text-decoration: underline; font-weight: 500; }
+  .download:focus-visible { outline: 2px solid #5b8ad0; outline-offset: 2px; }
+  nav { margin-top: 2rem; }
+  nav a { color: #aaa; text-decoration: none; }
+  nav a:focus-visible { outline: 2px solid #5b8ad0; outline-offset: 2px; }`;
 
 // --- Variant config ---
 
@@ -187,31 +195,44 @@ function navLinks(currentKey) {
 function renderPage(key) {
   const v = VARIANTS[key];
   const imgStyle = v.tall ? "max-height:70vh;" : "max-width:100%;";
+  const desc = "Ta screenshots av websidor i olika format. Desktop, mobil, iPad och stor.";
+  const url = `${BASE_URL}${v.path}`;
   return `<!DOCTYPE html>
 <html lang="sv">
 <head>
-  <meta charset="utf-8"><title>${v.title}</title>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${v.title}</title>
+  <meta name="description" content="${desc}">
+  <meta property="og:title" content="${v.title}">
+  <meta property="og:description" content="${desc}">
+  <meta property="og:image" content="${BASE_URL}/og.png">
+  <meta property="og:url" content="${url}">
+  <meta property="og:type" content="website">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="${v.title}">
+  <meta name="twitter:description" content="${desc}">
+  <meta name="twitter:image" content="${BASE_URL}/og.png">
+  <link rel="canonical" href="${url}">
   <style>${STYLE} .preview img{${imgStyle}}</style>${ANALYTICS}
 </head>
 <body>
-  <div class="container">
-    <h1><span style="font-size:4rem">${v.emoji}</span><br>${v.title}</h1>
-    <form id="f"><input type="url" id="u" placeholder="https://example.com" required><button id="b">Ta screenshot</button></form>
-    <div class="status" id="s"></div>
+  <main class="container">
+    <h1><span style="font-size:4rem" aria-hidden="true">${v.emoji}</span><br>${v.title}</h1>
+    <form id="f"><label for="u">URL</label><input type="url" id="u" placeholder="https://example.com" required><button id="b">Ta screenshot</button></form>
+    <div class="status" id="s" aria-live="polite"></div>
     <div class="preview" id="p"></div>
     <div style="margin-top:3rem;padding-top:2rem;border-top:1px solid #333">
       <p style="color:#aaa;margin-bottom:0.5rem">Dra denna till bokmärkesfältet:</p>
       <a href="javascript:void(window.location='https://click.grj.se${v.shotPath}?dl&url='+encodeURIComponent(location.href))" style="display:inline-block;padding:0.5rem 1rem;background:#e94560;color:#fff;border-radius:6px;text-decoration:none;font-weight:500">${v.title}</a>
     </div>
-    <div class="links">${navLinks(key)}</div>
-  </div>
+    <nav aria-label="Varianter">${navLinks(key)}</nav>
+  </main>
   <script>
     document.getElementById('f').onsubmit=async e=>{
       e.preventDefault();const url=document.getElementById('u').value,b=document.getElementById('b'),s=document.getElementById('s'),p=document.getElementById('p');
       b.disabled=true;s.textContent='Tar screenshot...';p.innerHTML='';
       try{const r=await fetch('${v.shotPath}?url='+encodeURIComponent(url));if(!r.ok)throw new Error(await r.text());
         const bl=await r.blob(),i=URL.createObjectURL(bl),fn=url.replace(/^https?:\\/\\//,'').replace(/[^a-zA-Z0-9]/g,'-').replace(/-+/g,'-').replace(/-$/,'')+'${v.suffix}.png';
-        p.innerHTML='<img src="'+i+'"><br><a class="download" href="'+i+'" download="'+fn+'">Ladda ner</a>';s.textContent='';
+        p.innerHTML='<img src="'+i+'" alt="Screenshot av '+url+'"><br><a class="download" href="'+i+'" download="'+fn+'">Ladda ner</a>';s.textContent='';
       }catch(err){s.textContent='Fel: '+err.message}b.disabled=false;
     };
   </script>
@@ -219,24 +240,36 @@ function renderPage(key) {
 }
 
 function renderAllPage() {
+  const desc = "Ta screenshots av websidor i alla format på en gång. Ladda ner som ZIP.";
   return `<!DOCTYPE html>
 <html lang="sv">
 <head>
-  <meta charset="utf-8"><title>Click All</title>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Click All</title>
+  <meta name="description" content="${desc}">
+  <meta property="og:title" content="Click All">
+  <meta property="og:description" content="${desc}">
+  <meta property="og:image" content="${BASE_URL}/og.png">
+  <meta property="og:url" content="${BASE_URL}/all">
+  <meta property="og:type" content="website">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="twitter:title" content="Click All">
+  <meta name="twitter:description" content="${desc}">
+  <meta name="twitter:image" content="${BASE_URL}/og.png">
+  <link rel="canonical" href="${BASE_URL}/all">
   <style>${STYLE}</style>${ANALYTICS}
 </head>
 <body>
-  <div class="container">
-    <h1><span style="font-size:4rem">📦</span><br>Click All</h1>
-    <form id="f"><input type="url" id="u" placeholder="https://example.com" required><button id="b">Ta alla screenshots</button></form>
-    <div class="status" id="s"></div>
+  <main class="container">
+    <h1><span style="font-size:4rem" aria-hidden="true">📦</span><br>Click All</h1>
+    <form id="f"><label for="u">URL</label><input type="url" id="u" placeholder="https://example.com" required><button id="b">Ta alla screenshots</button></form>
+    <div class="status" id="s" aria-live="polite"></div>
     <div class="preview" id="p"></div>
     <div style="margin-top:3rem;padding-top:2rem;border-top:1px solid #333">
       <p style="color:#aaa;margin-bottom:0.5rem">Dra denna till bokmärkesfältet:</p>
       <a href="javascript:void(window.location='https://click.grj.se/shot/all?url='+encodeURIComponent(location.href))" style="display:inline-block;padding:0.5rem 1rem;background:#e94560;color:#fff;border-radius:6px;text-decoration:none;font-weight:500">Click All</a>
     </div>
-    <div class="links">${navLinks("all")}</div>
-  </div>
+    <nav aria-label="Varianter">${navLinks("all")}</nav>
+  </main>
   <script>
     document.getElementById('f').onsubmit=async e=>{
       e.preventDefault();const url=document.getElementById('u').value,b=document.getElementById('b'),s=document.getElementById('s'),p=document.getElementById('p');
