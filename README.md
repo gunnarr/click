@@ -12,6 +12,7 @@ Runs on a Mac Pro with [Puppeteer](https://pptr.dev/) and is exposed publicly vi
 | `/mobile` | 390×844 | iPhone with device frame |
 | `/tablet` | 820×1180 | iPad with device frame |
 | `/big` | 1720×1410 | Large desktop |
+| `/full` | 1280×auto | Full page (entire scrollable height) |
 | `/all` | All of the above | Downloads as ZIP |
 
 ## Features
@@ -30,6 +31,7 @@ GET /shot?url=<url>             → Desktop PNG
 GET /shot/mobile?url=<url>      → iPhone PNG with device frame
 GET /shot/tablet?url=<url>      → iPad PNG with device frame
 GET /shot/big?url=<url>         → Large desktop PNG
+GET /shot/full?url=<url>        → Full page PNG
 GET /shot/all?url=<url>         → ZIP with all variants
 ```
 

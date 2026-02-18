@@ -96,6 +96,17 @@ const VARIANTS = {
     suffix: "-big",
     viewport: { width: 1720, height: 1410 },
   },
+  full: {
+    path: "/full",
+    shotPath: "/shot/full",
+    title: "Click Full",
+    emoji: "📜",
+    label: "Hel",
+    suffix: "-full",
+    viewport: { width: 1280, height: 800 },
+    fullPage: true,
+    tall: true,
+  },
 };
 
 const VARIANT_KEYS = Object.keys(VARIANTS);
@@ -151,7 +162,7 @@ async function takeShot(browser, url, variant) {
   await dismissPopups(page);
 
   if (!variant.frame) {
-    const buf = await page.screenshot();
+    const buf = await page.screenshot({ fullPage: !!variant.fullPage });
     await page.close();
     return buf;
   }
