@@ -30,6 +30,8 @@ app.get("/", (req, res) => {
     .preview img { max-width: 100%; border-radius: 8px; box-shadow: 0 4px 20px rgba(0,0,0,0.4); }
     .download { display: inline-block; margin-top: 1rem; color: #e94560; text-decoration: none; font-weight: 500; }
   </style>
+  <script async src="https://s.grj.se/js/pa-aExm7a8ErYTh7VPXLbZz7.js"></script>
+  <script>window.plausible=window.plausible||function(){(plausible.q=plausible.q||[]).push(arguments)},plausible.init=plausible.init||function(i){plausible.o=i||{}};plausible.init()</script>
 </head>
 <body>
   <div class="container">
