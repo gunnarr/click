@@ -101,7 +101,7 @@ const VARIANTS = {
     shotPath: "/shot/full",
     title: "Click Full",
     emoji: "📜",
-    label: "Hel",
+    label: "Full",
     suffix: "-full",
     viewport: { width: 1280, height: 800 },
     fullPage: true,
