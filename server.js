@@ -91,6 +91,17 @@ const VARIANTS = {
 
 const VARIANT_KEYS = Object.keys(VARIANTS);
 
+// --- Persistent browser ---
+
+let browserInstance = null;
+
+async function getBrowser() {
+  if (browserInstance && browserInstance.connected) return browserInstance;
+  browserInstance = await puppeteer.launch({ args: BROWSER_ARGS });
+  browserInstance.on("disconnected", () => { browserInstance = null; });
+  return browserInstance;
+}
+
 // --- Screenshot helpers ---
 
 function urlToFilename(url) {
@@ -126,8 +137,8 @@ async function dismissPopups(page) {
 async function takeShot(browser, url, variant) {
   const page = await browser.newPage();
   await page.setViewport(variant.viewport);
-  await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
-  await new Promise((r) => setTimeout(r, 3000));
+  await page.goto(url, { waitUntil: "networkidle0", timeout: 30000 });
+  await new Promise((r) => setTimeout(r, 1000));
   await dismissPopups(page);
 
   if (!variant.frame) {
@@ -250,11 +261,9 @@ for (const key of VARIANT_KEYS) {
     const url = req.query.url;
     if (!url) return res.status(400).send("url krävs");
 
-    let browser;
     try {
-      browser = await puppeteer.launch({ args: BROWSER_ARGS });
+      const browser = await getBrowser();
       const screenshot = await takeShot(browser, url, v);
-      await browser.close();
 
       const filename = urlToFilename(url);
       res.set("Content-Type", "image/png");
@@ -263,7 +272,6 @@ for (const key of VARIANT_KEYS) {
       }
       res.send(screenshot);
     } catch (err) {
-      if (browser) await browser.close();
       res.status(500).send(err.message);
     }
   });
@@ -275,14 +283,12 @@ app.get("/shot/all", async (req, res) => {
   const url = req.query.url;
   if (!url) return res.status(400).send("url krävs");
 
-  let browser;
   try {
-    browser = await puppeteer.launch({ args: BROWSER_ARGS });
+    const browser = await getBrowser();
 
     const shots = await Promise.all(
       VARIANT_KEYS.map((key) => takeShot(browser, url, VARIANTS[key]))
     );
-    await browser.close();
 
     const filename = urlToFilename(url);
     res.set("Content-Type", "application/zip");
@@ -295,7 +301,6 @@ app.get("/shot/all", async (req, res) => {
     });
     await archive.finalize();
   } catch (err) {
-    if (browser) await browser.close();
     res.status(500).send(err.message);
   }
 });
