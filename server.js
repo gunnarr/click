@@ -212,7 +212,7 @@ function navLinks(currentKey) {
 function renderPage(key) {
   const v = VARIANTS[key];
   const imgStyle = v.tall ? "max-height:70vh;" : "max-width:100%;";
-  const desc = "Ta screenshots av websidor i olika format. Desktop, mobil, iPad och stor.";
+  const desc = "Ta screenshots av websidor i olika format. Desktop, mobil, iPad, stor och helsida.";
   const url = `${BASE_URL}${v.path}`;
   return `<!DOCTYPE html>
 <html lang="sv">
@@ -234,14 +234,14 @@ function renderPage(key) {
 <body>
   <main class="container">
     <h1><span style="font-size:4rem" aria-hidden="true">${v.emoji}</span><br>${v.title}</h1>
+    <nav aria-label="Varianter">${navLinks(key)}</nav>
+    <div style="margin-top:1.5rem;margin-bottom:1.5rem">
+      <p style="color:#aaa;margin-bottom:0.5rem;font-size:0.85rem">Dra till bokmärkesfältet:</p>
+      <a href="javascript:void(window.location='https://click.grj.se${v.shotPath}?dl&url='+encodeURIComponent(location.href))" style="display:inline-block;padding:0.4rem 0.8rem;background:#d03050;color:#fff;border-radius:6px;text-decoration:none;font-weight:500;font-size:0.85rem" title="Bookmarklet: ta ${v.hint.toLowerCase()}-screenshot av aktuell sida">${v.title}</a>
+    </div>
     <form id="f"><label for="u">URL</label><input type="url" id="u" placeholder="https://example.com" required><button id="b" title="Ta en ${v.hint.toLowerCase()}-screenshot">Ta screenshot</button></form>
     <div class="status" id="s" aria-live="polite"></div>
     <div class="preview" id="p"></div>
-    <div style="margin-top:3rem;padding-top:2rem;border-top:1px solid #333">
-      <p style="color:#aaa;margin-bottom:0.5rem">Dra denna till bokmärkesfältet:</p>
-      <a href="javascript:void(window.location='https://click.grj.se${v.shotPath}?dl&url='+encodeURIComponent(location.href))" style="display:inline-block;padding:0.5rem 1rem;background:#d03050;color:#fff;border-radius:6px;text-decoration:none;font-weight:500" title="Bookmarklet: ta ${v.hint.toLowerCase()}-screenshot av aktuell sida">${v.title}</a>
-    </div>
-    <nav aria-label="Varianter">${navLinks(key)}</nav>
   </main>
   <script>
     document.getElementById('f').onsubmit=async e=>{
@@ -278,14 +278,14 @@ function renderAllPage() {
 <body>
   <main class="container">
     <h1><span style="font-size:4rem" aria-hidden="true">📦</span><br>Click All</h1>
+    <nav aria-label="Varianter">${navLinks("all")}</nav>
+    <div style="margin-top:1.5rem;margin-bottom:1.5rem">
+      <p style="color:#aaa;margin-bottom:0.5rem;font-size:0.85rem">Dra till bokmärkesfältet:</p>
+      <a href="javascript:void(window.location='https://click.grj.se/shot/all?url='+encodeURIComponent(location.href))" style="display:inline-block;padding:0.4rem 0.8rem;background:#d03050;color:#fff;border-radius:6px;text-decoration:none;font-weight:500;font-size:0.85rem" title="Bookmarklet: ta alla screenshots av aktuell sida">Click All</a>
+    </div>
     <form id="f"><label for="u">URL</label><input type="url" id="u" placeholder="https://example.com" required><button id="b" title="Ta screenshots i alla format och ladda ner som ZIP">Ta alla screenshots</button></form>
     <div class="status" id="s" aria-live="polite"></div>
     <div class="preview" id="p"></div>
-    <div style="margin-top:3rem;padding-top:2rem;border-top:1px solid #333">
-      <p style="color:#aaa;margin-bottom:0.5rem">Dra denna till bokmärkesfältet:</p>
-      <a href="javascript:void(window.location='https://click.grj.se/shot/all?url='+encodeURIComponent(location.href))" style="display:inline-block;padding:0.5rem 1rem;background:#d03050;color:#fff;border-radius:6px;text-decoration:none;font-weight:500" title="Bookmarklet: ta alla screenshots av aktuell sida">Click All</a>
-    </div>
-    <nav aria-label="Varianter">${navLinks("all")}</nav>
   </main>
   <script>
     document.getElementById('f').onsubmit=async e=>{
