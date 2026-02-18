@@ -110,7 +110,7 @@ function urlToFilename(url) {
 
 async function dismissPopups(page) {
   await page.keyboard.press("Escape");
-  await new Promise((r) => setTimeout(r, 300));
+  await new Promise((r) => setTimeout(r, 150));
 
   const hasCanvas = await page.evaluate(() => document.querySelector("canvas") !== null);
   if (!hasCanvas) {
@@ -131,14 +131,14 @@ async function dismissPopups(page) {
       document.documentElement.style.overflow = "auto";
     });
   }
-  await new Promise((r) => setTimeout(r, 300));
+  await new Promise((r) => setTimeout(r, 150));
 }
 
 async function takeShot(browser, url, variant) {
   const page = await browser.newPage();
   await page.setViewport(variant.viewport);
-  await page.goto(url, { waitUntil: "networkidle0", timeout: 30000 });
-  await new Promise((r) => setTimeout(r, 1000));
+  await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
+  await new Promise((r) => setTimeout(r, 500));
   await dismissPopups(page);
 
   if (!variant.frame) {
