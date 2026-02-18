@@ -10,6 +10,8 @@ const MOBILE_WIDTH = 390;
 const MOBILE_HEIGHT = 844;
 const BIG_WIDTH = 1720;
 const BIG_HEIGHT = 1410;
+const TABLET_WIDTH = 820;
+const TABLET_HEIGHT = 1180;
 
 const ANALYTICS = `
   <script async src="https://s.grj.se/js/pa-aExm7a8ErYTh7VPXLbZz7.js"></script>
@@ -133,8 +135,57 @@ async function takeMobileShot(browser, url) {
   return buf;
 }
 
+async function takeTabletShot(browser, url) {
+  const page = await browser.newPage();
+  await page.setViewport({
+    width: TABLET_WIDTH,
+    height: TABLET_HEIGHT,
+    isMobile: true,
+    hasTouch: true,
+    deviceScaleFactor: 2,
+  });
+  await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
+  await new Promise((r) => setTimeout(r, 3000));
+  await dismissPopups(page);
+
+  const screenshotData = await page.screenshot({ encoding: "base64" });
+  await page.close();
+
+  const framePage = await browser.newPage();
+  await framePage.setViewport({ width: 620, height: 880, deviceScaleFactor: 2 });
+  await framePage.setContent(`<!DOCTYPE html>
+<html>
+<head><style>
+  * { margin: 0; padding: 0; }
+  body { background: transparent; display: flex; align-items: center; justify-content: center; height: 100vh; }
+  .tablet {
+    width: 560px; height: 780px; border-radius: 24px;
+    border: 8px solid #2a2a2a; background: #000; padding: 20px 16px;
+    position: relative;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5), inset 0 0 0 2px #3a3a3a;
+  }
+  .tablet::before {
+    content: ''; position: absolute; top: 10px; left: 50%;
+    transform: translateX(-50%); width: 6px; height: 6px;
+    background: #1a1a1a; border-radius: 50%; z-index: 10;
+  }
+  .screen { width: 100%; height: 100%; border-radius: 12px; overflow: hidden; }
+  .screen img { width: 100%; height: 100%; object-fit: cover; object-position: top; }
+</style></head>
+<body>
+  <div class="tablet"><div class="screen">
+    <img src="data:image/png;base64,${screenshotData}">
+  </div></div>
+</body>
+</html>`);
+
+  const buf = await framePage.screenshot({ omitBackground: true });
+  await framePage.close();
+  return buf;
+}
+
 function page(title, emoji, endpoint, suffix, bookmarkLabel, links) {
-  const imgStyle = suffix === "-mobile" ? "max-height:70vh;" : "max-width:100%;";
+  const imgStyle = (suffix === "-mobile" || suffix === "-tablet") ? "max-height:70vh;" : "max-width:100%;";
   return `<!DOCTYPE html>
 <html lang="sv">
 <head>
@@ -193,21 +244,28 @@ function page(title, emoji, endpoint, suffix, bookmarkLabel, links) {
 app.get("/", (req, res) => {
   res.send(page("Click", "📸", "/shot", "",
     "Click",
-    '<a href="/mobile">📱 Mobil</a> · <a href="/big">🖥️ Stor</a> · <a href="/all">📦 Alla</a>'
+    '<a href="/mobile">📱 Mobil</a> · <a href="/tablet">📋 iPad</a> · <a href="/big">🖥️ Stor</a> · <a href="/all">📦 Alla</a>'
   ));
 });
 
 app.get("/mobile", (req, res) => {
   res.send(page("Click Mobile", "📱", "/shot/mobile", "-mobile",
     "Click Mobile",
-    '<a href="/">📸 Desktop</a> · <a href="/big">🖥️ Stor</a> · <a href="/all">📦 Alla</a>'
+    '<a href="/">📸 Desktop</a> · <a href="/tablet">📋 iPad</a> · <a href="/big">🖥️ Stor</a> · <a href="/all">📦 Alla</a>'
+  ));
+});
+
+app.get("/tablet", (req, res) => {
+  res.send(page("Click iPad", "📋", "/shot/tablet", "-tablet",
+    "Click iPad",
+    '<a href="/">📸 Desktop</a> · <a href="/mobile">📱 Mobil</a> · <a href="/big">🖥️ Stor</a> · <a href="/all">📦 Alla</a>'
   ));
 });
 
 app.get("/big", (req, res) => {
   res.send(page("Click Big", "🖥️", "/shot/big", "-big",
     "Click Big",
-    '<a href="/">📸 Desktop</a> · <a href="/mobile">📱 Mobil</a> · <a href="/all">📦 Alla</a>'
+    '<a href="/">📸 Desktop</a> · <a href="/mobile">📱 Mobil</a> · <a href="/tablet">📋 iPad</a> · <a href="/all">📦 Alla</a>'
   ));
 });
 
@@ -232,7 +290,7 @@ app.get("/all", (req, res) => {
       <p style="color:#aaa;margin-bottom:0.5rem">Dra denna till bokmärkesfältet:</p>
       <a href="javascript:void(window.location='https://click.grj.se/shot/all?url='+encodeURIComponent(location.href))" style="display:inline-block;padding:0.5rem 1rem;background:#e94560;color:#fff;border-radius:6px;text-decoration:none;font-weight:500">Click All</a>
     </div>
-    <div class="links"><a href="/">📸 Desktop</a> · <a href="/mobile">📱 Mobil</a> · <a href="/big">🖥️ Stor</a></div>
+    <div class="links"><a href="/">📸 Desktop</a> · <a href="/mobile">📱 Mobil</a> · <a href="/tablet">📋 iPad</a> · <a href="/big">🖥️ Stor</a></div>
   </div>
   <script>
     const form = document.getElementById('form');
@@ -309,6 +367,28 @@ app.get("/shot/big", async (req, res) => {
   }
 });
 
+app.get("/shot/tablet", async (req, res) => {
+  const url = req.query.url;
+  if (!url) return res.status(400).send("url krävs");
+
+  let browser;
+  try {
+    browser = await puppeteer.launch({ args: ["--no-sandbox", "--disable-setuid-sandbox"] });
+    const screenshot = await takeTabletShot(browser, url);
+    await browser.close();
+
+    const filename = urlToFilename(url);
+    res.set("Content-Type", "image/png");
+    if (req.query.dl !== undefined) {
+      res.set("Content-Disposition", `attachment; filename="${filename}-tablet.png"`);
+    }
+    res.send(screenshot);
+  } catch (err) {
+    if (browser) await browser.close();
+    res.status(500).send(err.message);
+  }
+});
+
 app.get("/shot/mobile", async (req, res) => {
   const url = req.query.url;
   if (!url) return res.status(400).send("url krävs");
@@ -339,10 +419,11 @@ app.get("/shot/all", async (req, res) => {
   try {
     browser = await puppeteer.launch({ args: ["--no-sandbox", "--disable-setuid-sandbox"] });
 
-    const [desktop, big, mobile] = await Promise.all([
+    const [desktop, big, mobile, tablet] = await Promise.all([
       takeDesktopShot(browser, url, WIDTH, HEIGHT),
       takeDesktopShot(browser, url, BIG_WIDTH, BIG_HEIGHT),
       takeMobileShot(browser, url),
+      takeTabletShot(browser, url),
     ]);
     await browser.close();
 
@@ -356,6 +437,7 @@ app.get("/shot/all", async (req, res) => {
     archive.append(desktop, { name: `${filename}.png` });
     archive.append(big, { name: `${filename}-big.png` });
     archive.append(mobile, { name: `${filename}-mobile.png` });
+    archive.append(tablet, { name: `${filename}-tablet.png` });
     await archive.finalize();
   } catch (err) {
     if (browser) await browser.close();
