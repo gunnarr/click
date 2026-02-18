@@ -46,6 +46,7 @@ const VARIANTS = {
     title: "Click",
     emoji: "📸",
     label: "Desktop",
+    hint: "Desktop 1280×800",
     suffix: "",
     viewport: { width: 1280, height: 800 },
   },
@@ -55,6 +56,7 @@ const VARIANTS = {
     title: "Click Mobile",
     emoji: "📱",
     label: "Mobil",
+    hint: "iPhone 390×844 med ram",
     suffix: "-mobile",
     viewport: { width: 390, height: 844, isMobile: true, hasTouch: true, deviceScaleFactor: 2 },
     frame: {
@@ -74,6 +76,7 @@ const VARIANTS = {
     title: "Click iPad",
     emoji: "📋",
     label: "iPad",
+    hint: "iPad 820×1180 med ram",
     suffix: "-tablet",
     viewport: { width: 820, height: 1180, isMobile: true, hasTouch: true, deviceScaleFactor: 2 },
     frame: {
@@ -93,6 +96,7 @@ const VARIANTS = {
     title: "Click Big",
     emoji: "🖥️",
     label: "Stor",
+    hint: "Stor desktop 1720×1410",
     suffix: "-big",
     viewport: { width: 1720, height: 1410 },
   },
@@ -102,6 +106,7 @@ const VARIANTS = {
     title: "Click Full",
     emoji: "📜",
     label: "Full",
+    hint: "Hela sidan 1280px bred",
     suffix: "-full",
     viewport: { width: 1280, height: 800 },
     fullPage: true,
@@ -197,9 +202,9 @@ function navLinks(currentKey) {
   return all
     .filter((k) => k !== currentKey)
     .map((k) => {
-      if (k === "all") return '<a href="/all">📦 Alla</a>';
+      if (k === "all") return '<a href="/all" title="Alla format som ZIP">📦 Alla</a>';
       const v = VARIANTS[k];
-      return `<a href="${v.path}">${v.emoji} ${v.label}</a>`;
+      return `<a href="${v.path}" title="${v.hint}">${v.emoji} ${v.label}</a>`;
     })
     .join(" · ");
 }
@@ -229,12 +234,12 @@ function renderPage(key) {
 <body>
   <main class="container">
     <h1><span style="font-size:4rem" aria-hidden="true">${v.emoji}</span><br>${v.title}</h1>
-    <form id="f"><label for="u">URL</label><input type="url" id="u" placeholder="https://example.com" required><button id="b">Ta screenshot</button></form>
+    <form id="f"><label for="u">URL</label><input type="url" id="u" placeholder="https://example.com" required><button id="b" title="Ta en ${v.hint.toLowerCase()}-screenshot">Ta screenshot</button></form>
     <div class="status" id="s" aria-live="polite"></div>
     <div class="preview" id="p"></div>
     <div style="margin-top:3rem;padding-top:2rem;border-top:1px solid #333">
       <p style="color:#aaa;margin-bottom:0.5rem">Dra denna till bokmärkesfältet:</p>
-      <a href="javascript:void(window.location='https://click.grj.se${v.shotPath}?dl&url='+encodeURIComponent(location.href))" style="display:inline-block;padding:0.5rem 1rem;background:#d03050;color:#fff;border-radius:6px;text-decoration:none;font-weight:500">${v.title}</a>
+      <a href="javascript:void(window.location='https://click.grj.se${v.shotPath}?dl&url='+encodeURIComponent(location.href))" style="display:inline-block;padding:0.5rem 1rem;background:#d03050;color:#fff;border-radius:6px;text-decoration:none;font-weight:500" title="Bookmarklet: ta ${v.hint.toLowerCase()}-screenshot av aktuell sida">${v.title}</a>
     </div>
     <nav aria-label="Varianter">${navLinks(key)}</nav>
   </main>
@@ -273,12 +278,12 @@ function renderAllPage() {
 <body>
   <main class="container">
     <h1><span style="font-size:4rem" aria-hidden="true">📦</span><br>Click All</h1>
-    <form id="f"><label for="u">URL</label><input type="url" id="u" placeholder="https://example.com" required><button id="b">Ta alla screenshots</button></form>
+    <form id="f"><label for="u">URL</label><input type="url" id="u" placeholder="https://example.com" required><button id="b" title="Ta screenshots i alla format och ladda ner som ZIP">Ta alla screenshots</button></form>
     <div class="status" id="s" aria-live="polite"></div>
     <div class="preview" id="p"></div>
     <div style="margin-top:3rem;padding-top:2rem;border-top:1px solid #333">
       <p style="color:#aaa;margin-bottom:0.5rem">Dra denna till bokmärkesfältet:</p>
-      <a href="javascript:void(window.location='https://click.grj.se/shot/all?url='+encodeURIComponent(location.href))" style="display:inline-block;padding:0.5rem 1rem;background:#d03050;color:#fff;border-radius:6px;text-decoration:none;font-weight:500">Click All</a>
+      <a href="javascript:void(window.location='https://click.grj.se/shot/all?url='+encodeURIComponent(location.href))" style="display:inline-block;padding:0.5rem 1rem;background:#d03050;color:#fff;border-radius:6px;text-decoration:none;font-weight:500" title="Bookmarklet: ta alla screenshots av aktuell sida">Click All</a>
     </div>
     <nav aria-label="Varianter">${navLinks("all")}</nav>
   </main>
