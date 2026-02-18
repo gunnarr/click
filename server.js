@@ -22,9 +22,10 @@ const STYLE = `
   form { display: flex; gap: 0.5rem; }
   label { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); border: 0; }
   input { flex: 1; padding: 0.75rem 1rem; border-radius: 8px; border: 1px solid #333; background: #16213e; color: #eee; font-size: 1rem; }
+  input::placeholder { color: #888; }
   input:focus { border-color: #5b8ad0; outline: 2px solid #5b8ad0; outline-offset: 1px; }
-  button { padding: 0.75rem 1.5rem; border-radius: 8px; border: none; background: #e94560; color: #fff; font-size: 1rem; cursor: pointer; }
-  button:hover { background: #c73652; }
+  button { padding: 0.75rem 1.5rem; border-radius: 8px; border: none; background: #d03050; color: #fff; font-size: 1rem; cursor: pointer; }
+  button:hover { background: #b02a44; }
   button:focus-visible { outline: 2px solid #5b8ad0; outline-offset: 2px; }
   button:disabled { opacity: 0.5; cursor: wait; }
   .status { margin-top: 1rem; min-height: 1.5rem; color: #aaa; }
@@ -222,7 +223,7 @@ function renderPage(key) {
     <div class="preview" id="p"></div>
     <div style="margin-top:3rem;padding-top:2rem;border-top:1px solid #333">
       <p style="color:#aaa;margin-bottom:0.5rem">Dra denna till bokmärkesfältet:</p>
-      <a href="javascript:void(window.location='https://click.grj.se${v.shotPath}?dl&url='+encodeURIComponent(location.href))" style="display:inline-block;padding:0.5rem 1rem;background:#e94560;color:#fff;border-radius:6px;text-decoration:none;font-weight:500">${v.title}</a>
+      <a href="javascript:void(window.location='https://click.grj.se${v.shotPath}?dl&url='+encodeURIComponent(location.href))" style="display:inline-block;padding:0.5rem 1rem;background:#d03050;color:#fff;border-radius:6px;text-decoration:none;font-weight:500">${v.title}</a>
     </div>
     <nav aria-label="Varianter">${navLinks(key)}</nav>
   </main>
@@ -266,7 +267,7 @@ function renderAllPage() {
     <div class="preview" id="p"></div>
     <div style="margin-top:3rem;padding-top:2rem;border-top:1px solid #333">
       <p style="color:#aaa;margin-bottom:0.5rem">Dra denna till bokmärkesfältet:</p>
-      <a href="javascript:void(window.location='https://click.grj.se/shot/all?url='+encodeURIComponent(location.href))" style="display:inline-block;padding:0.5rem 1rem;background:#e94560;color:#fff;border-radius:6px;text-decoration:none;font-weight:500">Click All</a>
+      <a href="javascript:void(window.location='https://click.grj.se/shot/all?url='+encodeURIComponent(location.href))" style="display:inline-block;padding:0.5rem 1rem;background:#d03050;color:#fff;border-radius:6px;text-decoration:none;font-weight:500">Click All</a>
     </div>
     <nav aria-label="Varianter">${navLinks("all")}</nav>
   </main>
