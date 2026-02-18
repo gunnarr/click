@@ -48,6 +48,7 @@ app.get("/", (req, res) => {
       <p style="color:#aaa;margin-bottom:0.5rem">Dra denna till bokmärkesfältet:</p>
       <a href="javascript:void(window.location='https://click.grj.se/shot?dl&url='+encodeURIComponent(location.href))" style="display:inline-block;padding:0.5rem 1rem;background:#e94560;color:#fff;border-radius:6px;text-decoration:none;font-weight:500">Click</a>
     </div>
+    <div style="margin-top:2rem"><a href="/mobile" style="color:#aaa">📱 Vill du ha en mobilvariant istället?</a></div>
   </div>
   <script>
     const form = document.getElementById('form');
@@ -118,6 +119,7 @@ app.get("/mobile", (req, res) => {
       <p style="color:#aaa;margin-bottom:0.5rem">Dra denna till bokmärkesfältet:</p>
       <a href="javascript:void(window.location='https://click.grj.se/shot/mobile?dl&url='+encodeURIComponent(location.href))" style="display:inline-block;padding:0.5rem 1rem;background:#e94560;color:#fff;border-radius:6px;text-decoration:none;font-weight:500">Click Mobile</a>
     </div>
+    <div style="margin-top:2rem"><a href="/" style="color:#aaa">📸 Vill du ha en desktopvariant istället?</a></div>
   </div>
   <script>
     const form = document.getElementById('form');
