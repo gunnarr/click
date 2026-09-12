@@ -1314,3 +1314,322 @@ describe("Content-Disposition — servern äger filnamnet", () => {
     assert.match(disposition, /filename="filename-test-example-big-\d{8}-\d{6}\.png"/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 14. mailer — utskick, storleksgräns och retry
+// ---------------------------------------------------------------------------
+
+describe("mailer", () => {
+  const mailer = require("./mailer");
+
+  let sent;
+  const okResult = { id: "email_test_1" };
+
+  beforeEach(() => {
+    process.env.RESEND_API_KEY = "re_test_key";
+    process.env.CLICK_MAIL_FROM = "Click <click@gunnar.se>";
+    mailer._resetStatus();
+    mailer._setSleep(async () => {}); // ingen riktig väntan i sviten
+    sent = [];
+    mailer._setSender(async (payload, key) => {
+      sent.push({ payload, key });
+      return okResult;
+    });
+  });
+
+  afterEach(() => {
+    mailer._setSender(null);
+    mailer._setSleep(null);
+    delete process.env.RESEND_API_KEY;
+    delete process.env.CLICK_MAIL_FROM;
+    mailer._resetStatus();
+  });
+
+  const fail = (name, message = "nej") => {
+    const err = new Error(message);
+    if (name) err.resend = { name };
+    return err;
+  };
+
+  describe("buildAttachment", () => {
+    it("base64-kodar en Uint8Array", () => {
+      const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+      const att = mailer.buildAttachment(png, "x.png");
+      assert.equal(att.filename, "x.png");
+      assert.equal(att.content, Buffer.from([0x89, 0x50, 0x4e, 0x47]).toString("base64"));
+    });
+
+    it("innehållet är en sträng, aldrig Uint8Array eller Buffer", () => {
+      // JSON.stringify gör en Uint8Array till {"0":137,…} — tyst korrupt bilaga.
+      const att = mailer.buildAttachment(new Uint8Array([1, 2, 3]), "x.png");
+      assert.equal(typeof att.content, "string");
+    });
+
+    it("respekterar byteOffset i en vy över en större buffert", () => {
+      const pool = new Uint8Array([9, 9, 1, 2, 3, 9]);
+      const view = pool.subarray(2, 5); // [1,2,3]
+      const att = mailer.buildAttachment(view, "x.png");
+      assert.equal(att.content, Buffer.from([1, 2, 3]).toString("base64"));
+    });
+  });
+
+  describe("send", () => {
+    it("skickar med rätt avsändare och mottagare", async () => {
+      await mailer.send({ to: "gunnar@gunnar.se", subject: "Hej", text: "kropp" });
+      assert.equal(sent.length, 1);
+      assert.equal(sent[0].payload.from, "Click <click@gunnar.se>");
+      assert.deepEqual(sent[0].payload.to, ["gunnar@gunnar.se"]);
+      assert.equal(sent[0].payload.subject, "Hej");
+    });
+
+    it("skickar med idempotensnyckel när en ges", async () => {
+      await mailer.send({ to: "a@b.se", subject: "x", idempotencyKey: "nyckel-1" });
+      assert.equal(sent[0].key, "nyckel-1");
+    });
+
+    it("utelämnar attachments-fältet när det inte finns bilagor", async () => {
+      await mailer.send({ to: "a@b.se", subject: "x" });
+      assert.equal("attachments" in sent[0].payload, false);
+    });
+
+    it("kastar när nyckel saknas, utan att röra nätverket", async () => {
+      delete process.env.RESEND_API_KEY;
+      await assert.rejects(mailer.send({ to: "a@b.se", subject: "x" }), /inte konfigurerat/);
+      assert.equal(sent.length, 0);
+    });
+  });
+
+  describe("storleksgräns", () => {
+    it("avvisar för stora bilagor innan API:et anropas", async () => {
+      // Storleksvakten finns för att Resend saknar dokumenterad felkod för detta.
+      const big = mailer.buildAttachment(Buffer.alloc(21 * 1024 * 1024), "stor.png");
+      await assert.rejects(
+        mailer.send({ to: "a@b.se", subject: "x", attachments: [big] }),
+        /gränsen går vid/
+      );
+      assert.equal(sent.length, 0, "får aldrig nå nätverket");
+    });
+
+    it("summerar flera bilagor mot samma gräns", async () => {
+      const half = () => mailer.buildAttachment(Buffer.alloc(8 * 1024 * 1024), "d.png");
+      await assert.rejects(
+        mailer.send({ to: "a@b.se", subject: "x", attachments: [half(), half(), half()] }),
+        /gränsen går vid/
+      );
+    });
+
+    it("släpper igenom bilagor under gränsen", async () => {
+      const small = mailer.buildAttachment(Buffer.alloc(1024), "liten.png");
+      await mailer.send({ to: "a@b.se", subject: "x", attachments: [small] });
+      assert.equal(sent.length, 1);
+      assert.equal(sent[0].payload.attachments.length, 1);
+    });
+  });
+
+  describe("retry", () => {
+    it("försöker igen vid övergående fel och lyckas", async () => {
+      let n = 0;
+      mailer._setSender(async () => {
+        if (++n === 1) throw fail("service_unavailable");
+        return okResult;
+      });
+      await mailer.send({ to: "a@b.se", subject: "x" });
+      assert.equal(n, 2);
+    });
+
+    it("försöker igen vid nätverksfel utan resend-fält", async () => {
+      let n = 0;
+      mailer._setSender(async () => {
+        if (++n < 3) throw fail(null, "ECONNRESET");
+        return okResult;
+      });
+      await mailer.send({ to: "a@b.se", subject: "x" });
+      assert.equal(n, 3);
+    });
+
+    it("retriar ALDRIG daily_quota_exceeded", async () => {
+      let n = 0;
+      mailer._setSender(async () => {
+        n++;
+        throw fail("daily_quota_exceeded", "kvot slut");
+      });
+      await assert.rejects(mailer.send({ to: "a@b.se", subject: "x" }), /kvot slut/);
+      assert.equal(n, 1, "kvotfel delar 429 med rate limit men får inte retrias");
+    });
+
+    it("retriar ALDRIG monthly_quota_exceeded", async () => {
+      let n = 0;
+      mailer._setSender(async () => {
+        n++;
+        throw fail("monthly_quota_exceeded");
+      });
+      await assert.rejects(mailer.send({ to: "a@b.se", subject: "x" }));
+      assert.equal(n, 1);
+    });
+
+    it("retriar inte permanenta valideringsfel", async () => {
+      let n = 0;
+      mailer._setSender(async () => {
+        n++;
+        throw fail("invalid_parameter");
+      });
+      await assert.rejects(mailer.send({ to: "a@b.se", subject: "x" }));
+      assert.equal(n, 1);
+    });
+
+    it("ger upp efter tre försök", async () => {
+      let n = 0;
+      mailer._setSender(async () => {
+        n++;
+        throw fail("application_error");
+      });
+      await assert.rejects(mailer.send({ to: "a@b.se", subject: "x" }));
+      assert.equal(n, 3);
+    });
+  });
+
+  describe("dygnskvot", () => {
+    it("stoppar vid den egna gränsen innan Resends", async () => {
+      for (let i = 0; i < mailer.DAILY_LIMIT; i++) {
+        await mailer.send({ to: "a@b.se", subject: "x" });
+      }
+      assert.equal(sent.length, mailer.DAILY_LIMIT);
+      await assert.rejects(mailer.send({ to: "a@b.se", subject: "x" }), /dygnsgränsen/);
+      assert.equal(sent.length, mailer.DAILY_LIMIT, "det sista fick inte gå iväg");
+    });
+  });
+
+  describe("mailerStatus", () => {
+    it("är disabled utan nyckel", () => {
+      delete process.env.RESEND_API_KEY;
+      assert.equal(mailer.mailerStatus().status, "disabled");
+    });
+
+    it("är ok efter ett lyckat utskick", async () => {
+      await mailer.send({ to: "a@b.se", subject: "x" });
+      const s = mailer.mailerStatus();
+      assert.equal(s.status, "ok");
+      assert.equal(s.sent_today, 1);
+      assert.ok(s.last_send);
+    });
+
+    it("räknar fel i rad och nollställs av ett lyckat utskick", async () => {
+      mailer._setSender(async () => {
+        throw fail("invalid_parameter", "trasig");
+      });
+      await assert.rejects(mailer.send({ to: "a@b.se", subject: "x" }));
+      await assert.rejects(mailer.send({ to: "a@b.se", subject: "x" }));
+      let s = mailer.mailerStatus();
+      assert.equal(s.status, "error");
+      assert.equal(s.consecutive_failures, 2);
+      assert.equal(s.message, "trasig");
+
+      mailer._setSender(async () => okResult);
+      await mailer.send({ to: "a@b.se", subject: "x" });
+      s = mailer.mailerStatus();
+      assert.equal(s.status, "ok");
+      assert.equal(s.consecutive_failures, undefined);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 15. /health — mejlstatus rapporteras men får inte fälla tjänsten
+// ---------------------------------------------------------------------------
+
+describe("/health — mailer", () => {
+  const { app, _setBrowserInstance, _setLauncher } = require("./server");
+  const mailer = require("./mailer");
+  const { _reset } = require("./error-tracker");
+
+  let server;
+  let baseUrl;
+
+  beforeEach(async () => {
+    _reset();
+    mailer._resetStatus();
+    mailer._setSleep(async () => {});
+    _setBrowserInstance({ connected: true });
+    _setLauncher(async () => {
+      throw new Error("ingen riktig browser i det här testet");
+    });
+    await new Promise((resolve) => {
+      server = app.listen(0, "127.0.0.1", () => {
+        baseUrl = `http://127.0.0.1:${server.address().port}`;
+        resolve();
+      });
+    });
+  });
+
+  afterEach(async () => {
+    mailer._setSender(null);
+    mailer._setSleep(null);
+    mailer._resetStatus();
+    delete process.env.RESEND_API_KEY;
+    _setBrowserInstance(null);
+    _setLauncher(null);
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  function get() {
+    return new Promise((resolve, reject) => {
+      http
+        .get(`${baseUrl}/health`, (res) => {
+          let data = "";
+          res.on("data", (c) => (data += c));
+          res.on("end", () => resolve({ status: res.statusCode, body: JSON.parse(data) }));
+        })
+        .on("error", reject);
+    });
+  }
+
+  it("rapporterar disabled när ingen nyckel är satt", async () => {
+    const { status, body } = await get();
+    assert.equal(status, 200);
+    assert.equal(body.checks.mailer.status, "disabled");
+  });
+
+  it("en avstängd mailer gör inte tjänsten ohälsosam", async () => {
+    const { status, body } = await get();
+    assert.equal(status, 200);
+    assert.equal(body.status, "ok");
+  });
+
+  it("EN TRASIG MAILER FÄLLER INTE /health", async () => {
+    // Beslutet: mejlfel rapporteras men flippar inte statusen. Annars hade ett
+    // Resend-avbrott målat tjänsten röd trots fungerande skärmdumpar — och
+    // blockerat varje deploy, eftersom CI:s healthcheck gate:ar på det här svaret.
+    process.env.RESEND_API_KEY = "re_test";
+    mailer._setSender(async () => {
+      const err = new Error("nere");
+      err.resend = { name: "invalid_parameter" };
+      throw err;
+    });
+    for (let i = 0; i < 5; i++) {
+      await assert.rejects(mailer.send({ to: "a@b.se", subject: "x" }));
+    }
+
+    const { status, body } = await get();
+    assert.equal(status, 200, "tjänsten är frisk — det är bara mejlet som är trasigt");
+    assert.equal(body.status, "ok");
+    assert.equal(body.checks.mailer.status, "error");
+    assert.equal(body.checks.mailer.consecutive_failures, 5);
+  });
+
+  it("browsern avgör fortfarande statusen", async () => {
+    process.env.RESEND_API_KEY = "re_test";
+    _setBrowserInstance({ connected: false });
+    _setLauncher(async () => {
+      throw new Error("Could not find Chrome");
+    });
+    const logged = console.error;
+    console.error = () => {};
+    try {
+      const { status, body } = await get();
+      assert.equal(status, 503, "en trasig browser SKA fälla tjänsten");
+      assert.equal(body.checks.browser.status, "error");
+    } finally {
+      console.error = logged;
+    }
+  });
+});

@@ -11,6 +11,7 @@ const {
   rateLimit,
   withSlot,
 } = require("./guard");
+const { mailerStatus } = require("./mailer");
 
 const app = express();
 const PORT = 3131;
@@ -426,6 +427,11 @@ app.get("/health", async (req, res) => {
     };
     healthy = false;
   }
+
+  // Mejlstatus rapporteras men flippar INTE den övergripande statusen. Ett
+  // Resend-avbrott skulle annars måla tjänsten röd trots att skärmdumpar fungerar
+  // för alla, och blockera varje deploy. Kuma får en egen monitor på det här fältet.
+  checks.mailer = mailerStatus();
 
   const status = healthy ? "ok" : "error";
   res.status(healthy ? 200 : 503).json({
