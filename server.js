@@ -557,6 +557,46 @@ app.get("/auth/me", (req, res) => {
   res.json({ email: req.session.email });
 });
 
+// Hur länge svaret får vänta på Resend. Vi väntar in utskicket för att kunna
+// säga om det gick — tyst misslyckande är den felklass som redan kostat den här
+// tjänsten fyra dygns nedtid. Men ett mejlfel får aldrig påverka statuskoden:
+// bilden är färdig och ska ut oavsett.
+const MAIL_TIMEOUT_MS = 6000;
+
+const MAIL_OFF = "off";
+const MAIL_SENT = "sent";
+const MAIL_FAILED = "failed";
+
+// Mottagaren kommer från sessionen, som i sin tur kontrollerats mot allowlisten
+// vid varje förfrågan. Aldrig från query-parametrar — det vore ett öppet spamrelä
+// som skickar från en verifierad domän.
+async function mailShots(session, url, attachments) {
+  if (!session || !mailer.isConfigured()) return MAIL_OFF;
+  const label = attachments.length > 1 ? `${attachments.length} format` : attachments[0].filename;
+  // Timern måste rensas explicit — Promise.race avbryter inte förloraren, så utan
+  // clearTimeout lämnar varje skärmdump en timer hängande i sex sekunder.
+  let timer;
+  try {
+    await Promise.race([
+      mailer.send({
+        to: session.email,
+        subject: `Screenshot: ${url}`,
+        text: `${url}\n\n${label}`,
+        attachments,
+      }),
+      new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error("mejlet tog för lång tid")), MAIL_TIMEOUT_MS);
+      }),
+    ]);
+    return MAIL_SENT;
+  } catch (err) {
+    console.error("[mail]", err.message);
+    return MAIL_FAILED;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 // --- Routes ---
 
 for (const key of VARIANT_KEYS) {
@@ -579,9 +619,17 @@ for (const key of VARIANT_KEYS) {
       // Namnet sätts alltid här, även utan ?dl — klienten läser tillbaka det ur headern
       // istället för att bygga ett eget. Ett ställe, inga kopior som glider isär.
       const filename = shotFilename(url, v.suffix, timestamp());
+
+      // Samma bytes till både svaret och bilagan — aldrig två fångster.
+      const mailState = await mailShots(req.session, url, [
+        mailer.buildAttachment(screenshot, filename),
+      ]);
+      auth.maybeRenew(req, res);
+
       const disposition = req.query.dl !== undefined ? "attachment" : "inline";
       res.set("Content-Type", "image/png");
       res.set("Content-Disposition", `${disposition}; filename="${filename}"`);
+      res.set("X-Click-Mail", mailState);
       res.send(screenshot);
     } catch (err) {
       if (err.busy) return res.status(429).send(err.message);
@@ -617,6 +665,18 @@ app.get("/shot/all", rateLimit, async (req, res) => {
     const base = urlToFilename(url);
     res.set("Content-Type", "application/zip");
     res.set("Content-Disposition", `attachment; filename="${base}-${stamp}.zip"`);
+
+    // Fem separata PNG:er i mejlet, inte ZIP:en. Bättre leverans genom mejlfilter,
+    // och ZIP-strömningen nedan slipper buffras om för att kunna bifogas.
+    const mailState = await mailShots(
+      req.session,
+      url,
+      VARIANT_KEYS.map((key, i) =>
+        mailer.buildAttachment(shots[i], shotFilename(url, VARIANTS[key].suffix, stamp))
+      )
+    );
+    auth.maybeRenew(req, res);
+    res.set("X-Click-Mail", mailState);
 
     const archive = archiver("zip");
     archive.on("error", (err) => {
