@@ -2,7 +2,7 @@
 
 A simple web screenshot service. Enter a URL, get a PNG in multiple formats.
 
-Built with [Puppeteer](https://pptr.dev/). Live at [click.grj.se](https://click.grj.se).
+Built on [Puppeteer](https://pptr.dev/) and running at [click.grj.se](https://click.grj.se).
 
 ## Variants
 
@@ -33,16 +33,63 @@ GET /shot/tablet?url=<url>      → iPad PNG with device frame
 GET /shot/big?url=<url>         → Large desktop PNG
 GET /shot/full?url=<url>        → Full page PNG
 GET /shot/all?url=<url>         → ZIP with all variants
+GET /health                     → JSON status (200 healthy, 503 degraded)
 ```
 
-Add `&dl` to any endpoint to trigger a download header.
+Add `&dl` to any screenshot endpoint to trigger a download header.
+
+## Safety
+
+The service renders arbitrary URLs, so requests are constrained:
+
+- **SSRF protection** — private, loopback, link-local and CGNAT ranges are rejected, both
+  for the target URL and for every subresource the page tries to load. Responses that
+  arrive from an internal IP anyway (DNS rebinding) discard the screenshot.
+- **Rate limit** — 20 requests per IP per 5 minutes.
+- **Concurrency limit** — at most 3 screenshots at a time; further requests get a 429.
+- The Chrome sandbox is left enabled. Do not add `--no-sandbox`.
 
 ## Setup
 
 ```bash
-npm install
-node server.js
+npm install     # postinstall downloads the matching Chrome build
+npm start
 ```
 
-The server starts on port 3131.
+The server listens on `127.0.0.1:3131`. Set `HOST=0.0.0.0` to accept connections from
+other machines — note that the rate limiter then only trusts the socket address, since
+`cf-connecting-ip` can be forged by anything that reaches the port directly.
 
+### Chrome
+
+npm 11 blocks install scripts from dependencies, so Puppeteer's own postinstall never
+runs and cannot download Chrome. The `postinstall` script in `package.json` does it
+instead. To install or repair the browser by hand:
+
+```bash
+npx puppeteer browsers install chrome
+```
+
+Verify the extraction actually completed — it has been observed to exit 0 after
+unpacking only part of the archive:
+
+```bash
+ls ~/.cache/puppeteer/chrome/*/chrome-mac-arm64/"Google Chrome for Testing.app"/Contents/Frameworks/
+```
+
+If `Frameworks/` is missing, unzip the cached archive manually over the same directory.
+
+## Tests
+
+```bash
+npm test
+```
+
+Runs the full suite (no browser required — Puppeteer is stubbed).
+
+## Deployment
+
+Runs as a long-lived service behind a reverse proxy that terminates TLS, with the app
+bound to loopback. `/health` is intended for an uptime monitor: it returns 503 when the
+browser cannot be launched or when the error rate over the last 5 minutes exceeds the
+threshold.

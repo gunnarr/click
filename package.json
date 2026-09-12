@@ -1,16 +1,24 @@
 {
-  "name": "local-webshot",
+  "name": "click",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
+  "description": "Screenshot-tjänst: klistra in en URL, få en PNG i flera format.",
+  "main": "server.js",
   "scripts": {
-    "shot": "node webshot.js"
+    "start": "node server.js",
+    "test": "node --test test.js",
+    "postinstall": "puppeteer browsers install chrome"
   },
-  "keywords": [],
+  "keywords": [
+    "screenshot",
+    "puppeteer",
+    "png"
+  ],
   "author": "",
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "archiver": "^7.0.1",
+    "express": "^5.2.1",
     "puppeteer": "^24.37.3"
   }
 }

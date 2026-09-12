@@ -1,6 +1,18 @@
 node_modules/
 screenshots/
+
+# macOS
 .DS_Store
+
+# Hemligheter och lokala instruktioner
 .env
 CLAUDE.md
+
+# Loggar och lokalt skräp
 *.log
+*.bak
+*.orig
+*.pre-*
+
+# Testbilder som hamnar i projektroten (public/og.png påverkas inte)
+/*.png
