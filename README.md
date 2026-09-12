@@ -62,9 +62,16 @@ other machines — note that the rate limiter then only trusts the socket addres
 
 ### Chrome
 
-npm 11 blocks install scripts from dependencies, so Puppeteer's own postinstall never
-runs and cannot download Chrome. The `postinstall` script in `package.json` does it
-instead. To install or repair the browser by hand:
+Puppeteer's own postinstall — the step that downloads Chrome — cannot be relied on,
+for two independent reasons:
+
+- npm 11 blocks install scripts from dependencies outright, so it never runs at all.
+- On any npm version it only runs when Puppeteer itself is (re)installed. It therefore
+  never repairs a browser cache that has been emptied.
+
+The `postinstall` script in this package runs on every `npm install` regardless — npm
+only gates dependencies — which is what makes a deploy self-healing. To install or
+repair the browser by hand:
 
 ```bash
 npx puppeteer browsers install chrome
@@ -74,7 +81,7 @@ Verify the extraction actually completed — it has been observed to exit 0 afte
 unpacking only part of the archive:
 
 ```bash
-ls ~/.cache/puppeteer/chrome/*/chrome-mac-arm64/"Google Chrome for Testing.app"/Contents/Frameworks/
+ls ~/.cache/puppeteer/chrome/*/chrome-mac-*/"Google Chrome for Testing.app"/Contents/Frameworks/
 ```
 
 If `Frameworks/` is missing, unzip the cached archive manually over the same directory.
