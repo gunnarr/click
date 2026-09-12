@@ -9,9 +9,15 @@ const {
   assertNoPrivateAccess,
   publicMessage,
   rateLimit,
+  loginLimit,
+  loginGlobalLimit,
+  verifyLimit,
+  clientIp,
   withSlot,
 } = require("./guard");
-const { mailerStatus } = require("./mailer");
+const mailer = require("./mailer");
+const auth = require("./auth");
+const { mailerStatus } = mailer;
 
 const app = express();
 const PORT = 3131;
@@ -440,6 +446,115 @@ app.get("/health", async (req, res) => {
     version: "1.0.0",
     checks,
   });
+});
+
+// --- Inloggning ---
+//
+// Registreras efter /health med flit: hälsokontrollen ska aldrig kunna påverkas
+// av en cookie, en trasig nyckel eller en trasig mailer.
+
+app.use(express.json({ limit: "4kb" }));
+app.use(auth.attachSession);
+
+// Bästa-försök att göra en kod engångs. Överlever inte omstart — det bärande
+// skyddet är att utmaningscookien rensas, inte den här mängden.
+const consumedJti = new Set();
+
+function renderLogin() {
+  return `<!DOCTYPE html>
+<html lang="sv">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Logga in · Click</title><meta name="robots" content="noindex">
+  <style>${STYLE} input[readonly]{opacity:0.6} form{flex-direction:column}</style>
+</head>
+<body>
+  <main class="container">
+    <h1><span style="font-size:4rem" aria-hidden="true">🔑</span><br>Logga in</h1>
+    <p style="color:#aaa;font-size:0.9rem;margin-bottom:1.5rem">Inloggad får du skärmdumparna mejlade till dig.</p>
+    <form id="f">
+      <label for="u">E-post</label>
+      <input type="email" id="u" placeholder="du@example.com" required autocomplete="email">
+      <div id="step2" hidden style="margin-top:0.5rem">
+        <label for="pin">Kod</label>
+        <input type="text" id="pin" inputmode="numeric" pattern="[0-9]*" maxlength="6" placeholder="123456" autocomplete="one-time-code" style="width:100%">
+      </div>
+      <button id="b" style="margin-top:0.5rem">Skicka kod</button>
+    </form>
+    <div class="status" id="s" aria-live="polite"></div>
+    <nav aria-label="Tillbaka" style="margin-top:2rem"><a href="/">← Till Click</a></nav>
+  </main>
+  <script src="/login.js"></script>
+</body></html>`;
+}
+
+app.get("/login", (req, res) => res.send(renderLogin()));
+
+app.post("/auth/login", loginGlobalLimit, loginLimit, (req, res) => {
+  if (!auth.isConfigured()) return res.status(503).json({ error: "inloggning är inte påslagen" });
+  if (!auth.sameOrigin(req)) return res.status(403).json({ error: "fel ursprung" });
+
+  const email = auth.normalizeEmail(req.body?.email);
+  if (!email || email.length > 254 || !email.includes("@")) {
+    return res.status(400).json({ error: "ogiltig adress" });
+  }
+
+  // Skicka inte en kod till om en giltig utmaning redan är på gång.
+  const existing = auth.readChallenge(auth.readCookie(req, auth.CHALLENGE_COOKIE));
+  if (existing && existing.sub === email) return res.status(202).json({ ok: true });
+
+  // En riktig utmaning utfärdas för VARJE adress. Utan det blir närvaron av en
+  // Set-Cookie ett orakel som avslöjar vem som står på allowlisten.
+  const pin = auth.generatePin();
+  auth.setChallengeCookie(res, auth.makeChallenge(email, pin));
+
+  if (auth.isAllowed(email)) {
+    // Inte inväntat: att vänta hade lagt nätverkslatensen på svaret bara för
+    // tillåtna adresser, vilket är samma orakel fast i tidsdomänen.
+    mailer
+      .send({
+        to: email,
+        subject: "Din kod till Click",
+        text:
+          `Kod: ${pin}\n\nGiltig i 10 minuter.\n` +
+          `Begärd från ${clientIp(req)}.\n\n` +
+          `Var det inte du? Strunta i det — koden är värdelös utan webbläsaren som bad om den.`,
+      })
+      .catch((err) => console.error("[auth] kunde inte skicka kod:", err.message));
+  }
+
+  res.status(202).json({ ok: true });
+});
+
+app.post("/auth/verify", verifyLimit, (req, res) => {
+  if (!auth.isConfigured()) return res.status(503).json({ error: "inloggning är inte påslagen" });
+  if (!auth.sameOrigin(req)) return res.status(403).json({ error: "fel ursprung" });
+
+  const chal = auth.readChallenge(auth.readCookie(req, auth.CHALLENGE_COOKIE));
+  if (!chal) {
+    auth.clearChallengeCookie(res);
+    return res.status(401).json({ error: "koden gick ut — begär en ny" });
+  }
+  // Samma svar för fel kod, förbrukad kod och adress utanför allowlisten.
+  if (!auth.checkPin(chal, req.body?.pin) || !auth.isAllowed(chal.sub) || consumedJti.has(chal.jti)) {
+    auth.setChallengeCookie(res, auth.bumpChallenge(chal));
+    return res.status(401).json({ error: "fel kod" });
+  }
+
+  consumedJti.add(chal.jti);
+  auth.clearChallengeCookie(res);
+  auth.setSessionCookie(res, auth.makeSession(chal.sub));
+  res.status(200).json({ ok: true, email: chal.sub });
+});
+
+app.post("/auth/logout", (req, res) => {
+  auth.clearSessionCookie(res);
+  res.status(204).end();
+});
+
+app.get("/auth/me", (req, res) => {
+  if (!req.session) return res.status(401).json({ error: "ej inloggad" });
+  res.json({ email: req.session.email });
 });
 
 // --- Routes ---

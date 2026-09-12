@@ -1633,3 +1633,219 @@ describe("/health — mailer", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// 16. auth — signering, engångskod och session
+// ---------------------------------------------------------------------------
+
+describe("auth", () => {
+  const auth = require("./auth");
+
+  beforeEach(() => {
+    process.env.CLICK_SESSION_KEY = Buffer.alloc(32, 7).toString("base64");
+    process.env.CLICK_ALLOWED_EMAILS = "gunnar@gunnar.se";
+  });
+  afterEach(() => {
+    delete process.env.CLICK_SESSION_KEY;
+    delete process.env.CLICK_ALLOWED_EMAILS;
+    delete process.env.COOKIE_INSECURE;
+    auth._setClock(null);
+    auth._setRandomInt(null);
+  });
+
+  describe("konfiguration", () => {
+    it("är avstängd utan nyckel", () => {
+      delete process.env.CLICK_SESSION_KEY;
+      assert.equal(auth.isConfigured(), false);
+    });
+    it("är avstängd med tom allowlist", () => {
+      process.env.CLICK_ALLOWED_EMAILS = "";
+      assert.equal(auth.isConfigured(), false);
+    });
+    it("avvisar en för kort nyckel", () => {
+      process.env.CLICK_SESSION_KEY = Buffer.alloc(16).toString("base64");
+      assert.equal(auth.isConfigured(), false);
+    });
+    it("matchar adress oavsett skiftläge och blanksteg", () => {
+      assert.equal(auth.isAllowed("  GUNNAR@Gunnar.SE "), true);
+      assert.equal(auth.isAllowed("nagon@annan.se"), false);
+    });
+  });
+
+  describe("sessionstoken", () => {
+    it("går att läsa tillbaka", () => {
+      const s = auth.readSession(auth.makeSession("gunnar@gunnar.se"));
+      assert.equal(s.email, "gunnar@gunnar.se");
+      assert.equal(s.t, "sess");
+    });
+
+    it("avvisar manipulerad payload", () => {
+      const parts = auth.makeSession("gunnar@gunnar.se").split(".");
+      const evil = Buffer.from(JSON.stringify({ v: 1, t: "sess", email: "x@y.se", iat: Date.now(), exp: Date.now() + 1e6 })).toString("base64url");
+      assert.equal(auth.readSession(`${parts[0]}.${evil}.${parts[2]}`), null);
+    });
+
+    it("avvisar en kapad signatur utan att kasta", () => {
+      // timingSafeEqual kastar vid olika längd — utan längdkollen blir det ett 500.
+      const parts = auth.makeSession("gunnar@gunnar.se").split(".");
+      assert.doesNotThrow(() => auth.readSession(`${parts[0]}.${parts[1]}.AAAA`));
+      assert.equal(auth.readSession(`${parts[0]}.${parts[1]}.AAAA`), null);
+    });
+
+    it("avvisar skräp", () => {
+      for (const bad of ["", "abc", null, undefined, "v2.a.b", "x".repeat(5000)]) {
+        assert.equal(auth.readSession(bad), null);
+      }
+    });
+
+    it("avvisar en utmaning som presenteras som session", () => {
+      const chal = auth.makeChallenge("gunnar@gunnar.se", "123456");
+      assert.equal(auth.readSession(chal), null);
+    });
+
+    it("avvisar token signerad med annan nyckel", () => {
+      const token = auth.makeSession("gunnar@gunnar.se");
+      process.env.CLICK_SESSION_KEY = Buffer.alloc(32, 9).toString("base64");
+      assert.equal(auth.readSession(token), null);
+    });
+
+    it("går ut", () => {
+      const token = auth.makeSession("gunnar@gunnar.se");
+      auth._setClock(() => Date.now() + auth.SESSION_TTL_MS + 1000);
+      assert.equal(auth.readSession(token), null);
+    });
+
+    it("stryken ur allowlisten återkallar direkt", () => {
+      const token = auth.makeSession("gunnar@gunnar.se");
+      process.env.CLICK_ALLOWED_EMAILS = "nagon@annan.se";
+      assert.equal(auth.readSession(token), null);
+    });
+  });
+
+  describe("engångskod", () => {
+    it("är sex siffror", () => {
+      for (let i = 0; i < 200; i++) assert.match(auth.generatePin(), /^\d{6}$/);
+    });
+    it("nollutfyller små tal", () => {
+      auth._setRandomInt(() => 42);
+      assert.equal(auth.generatePin(), "000042");
+    });
+    it("normaliserar inmatning", () => {
+      assert.equal(auth.normalizePin(" 123 456 "), "123456");
+      assert.equal(auth.normalizePin("12-34-56"), "123456");
+      assert.equal(auth.normalizePin("12345"), null);
+      assert.equal(auth.normalizePin("1234567"), null);
+      assert.equal(auth.normalizePin(null), null);
+    });
+
+    it("rätt kod passerar, fel kod nekas", () => {
+      const chal = auth.readChallenge(auth.makeChallenge("gunnar@gunnar.se", "123456"));
+      assert.equal(auth.checkPin(chal, "123456"), true);
+      assert.equal(auth.checkPin(chal, "123457"), false);
+    });
+
+    it("samma kod ger olika hash i två utmaningar", () => {
+      const a = auth.readChallenge(auth.makeChallenge("gunnar@gunnar.se", "123456"));
+      const b = auth.readChallenge(auth.makeChallenge("gunnar@gunnar.se", "123456"));
+      assert.notEqual(a.ph, b.ph, "jti ska salta hashen");
+    });
+
+    it("slutar gälla efter fem försök", () => {
+      let token = auth.makeChallenge("gunnar@gunnar.se", "123456");
+      for (let i = 0; i < auth.MAX_PIN_ATTEMPTS; i++) {
+        const c = auth.readChallenge(token);
+        assert.ok(c, `försök ${i + 1} ska gå att läsa`);
+        token = auth.bumpChallenge(c);
+      }
+      assert.equal(auth.readChallenge(token), null);
+    });
+
+    it("går ut efter tio minuter", () => {
+      const token = auth.makeChallenge("gunnar@gunnar.se", "123456");
+      auth._setClock(() => Date.now() + auth.CHALLENGE_TTL_MS + 1000);
+      assert.equal(auth.readChallenge(token), null);
+    });
+  });
+
+  describe("cookies", () => {
+    const fakeRes = () => ({
+      cookies: [],
+      cookie(name, value, opts) {
+        this.cookies.push({ name, value, opts });
+      },
+    });
+
+    it("SESSIONSCOOKIEN MÅSTE VARA LAX, ALDRIG STRICT", () => {
+      // Strict skickas inte på en top-level cross-site GET, vilket är precis vad en
+      // bookmarklet är. Skärmdumpen kommer då tillbaka men oinloggad och omejlad —
+      // ett tyst fel i exakt det flöde funktionen finns för.
+      const res = fakeRes();
+      auth.setSessionCookie(res, "token");
+      assert.equal(res.cookies[0].opts.sameSite, "lax");
+      assert.notEqual(res.cookies[0].opts.sameSite, "strict");
+    });
+
+    it("utmaningscookien är strict", () => {
+      const res = fakeRes();
+      auth.setChallengeCookie(res, "token");
+      assert.equal(res.cookies[0].opts.sameSite, "strict");
+    });
+
+    it("båda är httpOnly och secure", () => {
+      const res = fakeRes();
+      auth.setSessionCookie(res, "t");
+      auth.setChallengeCookie(res, "t");
+      for (const c of res.cookies) {
+        assert.equal(c.opts.httpOnly, true);
+        assert.equal(c.opts.secure, true);
+      }
+    });
+
+    it("COOKIE_INSECURE=1 släpper secure för lokal utveckling", () => {
+      process.env.COOKIE_INSECURE = "1";
+      const res = fakeRes();
+      auth.setSessionCookie(res, "t");
+      assert.equal(res.cookies[0].opts.secure, false);
+    });
+
+    it("läser rätt cookie ur headern", () => {
+      const req = { headers: { cookie: "a=1; click_sess=xyz; b=2" } };
+      assert.equal(auth.readCookie(req, "click_sess"), "xyz");
+      assert.equal(auth.readCookie(req, "saknas"), null);
+      assert.equal(auth.readCookie({ headers: {} }, "click_sess"), null);
+    });
+  });
+
+  describe("sameOrigin", () => {
+    it("godkänner rätt ursprung", () => {
+      process.env.CLICK_ORIGIN = "https://click.grj.se";
+      assert.equal(auth.sameOrigin({ headers: { origin: "https://click.grj.se" } }), true);
+      delete process.env.CLICK_ORIGIN;
+    });
+    it("avvisar främmande ursprung", () => {
+      assert.equal(auth.sameOrigin({ headers: { origin: "https://ond.example" } }), false);
+    });
+    it("godkänner när Origin saknas men Sec-Fetch-Site är same-origin", () => {
+      assert.equal(auth.sameOrigin({ headers: { "sec-fetch-site": "same-origin" } }), true);
+      assert.equal(auth.sameOrigin({ headers: { "sec-fetch-site": "cross-site" } }), false);
+    });
+  });
+
+  describe("attachSession", () => {
+    it("sätter null utan konfiguration och avvisar aldrig", () => {
+      delete process.env.CLICK_SESSION_KEY;
+      const req = { headers: {} };
+      let called = false;
+      auth.attachSession(req, {}, () => (called = true));
+      assert.equal(req.session, null);
+      assert.equal(called, true);
+    });
+
+    it("plockar upp en giltig session ur cookien", () => {
+      const token = auth.makeSession("gunnar@gunnar.se");
+      const req = { headers: { cookie: `click_sess=${encodeURIComponent(token)}` } };
+      auth.attachSession(req, {}, () => {});
+      assert.equal(req.session.email, "gunnar@gunnar.se");
+    });
+  });
+});

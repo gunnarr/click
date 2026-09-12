@@ -142,23 +142,53 @@ function clientIp(req) {
   return first || socketIp;
 }
 
-function rateLimit(req, res, next) {
-  const ip = clientIp(req);
-  const now = Date.now();
-  const recent = (rateHits.get(ip) || []).filter((t) => now - t < RATE_WINDOW_MS);
-  if (recent.length >= RATE_MAX_PER_WINDOW) {
-    res.set("Retry-After", "300");
-    return res.status(429).send("för många förfrågningar — försök igen om en stund");
-  }
-  recent.push(now);
-  rateHits.set(ip, recent);
-  if (rateHits.size > 5000) {
-    for (const [k, v] of rateHits) {
-      if (v.every((t) => now - t >= RATE_WINDOW_MS)) rateHits.delete(k);
+// Mekanismen är densamma överallt; budgetarna är det inte. En Chrome-flik och ett
+// mejl i en människas inkorg kostar olika mycket. Fabriken gör att varje ny gräns
+// ärver clientIp-logiken istället för att återuppfinna den.
+function slidingWindow({ windowMs, max, keyFn = clientIp, message, json = false, hits = new Map() }) {
+  const mw = (req, res, next) => {
+    const key = keyFn(req);
+    const now = Date.now();
+    const recent = (hits.get(key) || []).filter((t) => now - t < windowMs);
+    if (recent.length >= max) {
+      res.set("Retry-After", String(Math.ceil(windowMs / 1000)));
+      return json ? res.status(429).json({ error: message }) : res.status(429).send(message);
     }
-  }
-  next();
+    recent.push(now);
+    hits.set(key, recent);
+    if (hits.size > 5000) {
+      for (const [k, v] of hits) if (v.every((t) => now - t >= windowMs)) hits.delete(k);
+    }
+    next();
+  };
+  mw._hits = hits;
+  return mw;
 }
+
+const rateLimit = slidingWindow({
+  windowMs: RATE_WINDOW_MS,
+  max: RATE_MAX_PER_WINDOW,
+  message: "för många förfrågningar — försök igen om en stund",
+  hits: rateHits,
+});
+
+// Ett mejl till en riktig inkorg är dyrare än en skärmdump. Egen budget, så att en
+// inloggningsflod inte kan låsa ute Gunnar från själva tjänsten.
+const loginLimit = slidingWindow({
+  windowMs: 15 * 60 * 1000, max: 3, json: true,
+  message: "för många inloggningsförsök — vänta en stund",
+});
+
+// Inkorgen är en delad resurs, så per-IP räcker inte mot en spridd flod.
+const loginGlobalLimit = slidingWindow({
+  windowMs: 15 * 60 * 1000, max: 8, json: true, keyFn: () => "global",
+  message: "för många inloggningsförsök — vänta en stund",
+});
+
+const verifyLimit = slidingWindow({
+  windowMs: 15 * 60 * 1000, max: 10, json: true,
+  message: "för många försök — vänta en stund",
+});
 
 // Global samtidighetsgräns — avvisar hellre än köar. Varje Chrome-flik kostar minne
 // och GPU, och maskinen har mer nytta av att svara 429 än av att svälla.
@@ -199,6 +229,10 @@ module.exports = {
   clientIp,
   publicMessage,
   rateLimit,
+  slidingWindow,
+  loginLimit,
+  loginGlobalLimit,
+  verifyLimit,
   withSlot,
   _internals: { dnsCache, rateHits, RATE_MAX_PER_WINDOW, MAX_CONCURRENT, REBOUND },
 };
