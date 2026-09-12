@@ -2,11 +2,35 @@ const express = require("express");
 const path = require("path");
 const puppeteer = require("puppeteer");
 const archiver = require("archiver");
+const { recordError, getErrorRate, ERROR_THRESHOLD } = require("./error-tracker");
+const {
+  validateTargetUrl,
+  guardPage,
+  assertNoPrivateAccess,
+  publicMessage,
+  rateLimit,
+  withSlot,
+} = require("./guard");
 
 const app = express();
 const PORT = 3131;
-const BROWSER_ARGS = ["--no-sandbox", "--disable-setuid-sandbox"];
+
+// Tjänsten exponeras via en tunnel som kör på samma maskin, så loopback räcker.
+// Att lyssna brett gör rate limit-headern spoofbar för alla som når porten direkt.
+// Sätt HOST=0.0.0.0 om servern medvetet ska nås direkt över nätverket.
+const HOST = process.env.HOST || "127.0.0.1";
+
+// Chrome renderar godtyckliga sidor från internet — sandboxen ska vara på. (Flaggorna
+// --no-sandbox/--disable-setuid-sandbox är ett Linux-som-root-recept och behövs inte här.)
+const BROWSER_ARGS = [];
+
+const GOTO_TIMEOUT_MS = 30000;
+// /shot/all tar fem bilder i följd bakom en tunnel som bryter vid 100 s. Kortare
+// per-bild-timeout håller hela ZIP:en innanför den gränsen.
+const ALL_GOTO_TIMEOUT_MS = 12000;
+
 const BASE_URL = "https://click.grj.se";
+const startedAt = Date.now();
 
 app.use(express.static(path.join(__dirname, "public")));
 
@@ -119,12 +143,40 @@ const VARIANT_KEYS = Object.keys(VARIANTS);
 // --- Persistent browser ---
 
 let browserInstance = null;
+let browserLaunch = null;
+let launcher = () => puppeteer.launch({ args: BROWSER_ARGS });
 
+// Samtidiga anrop måste dela på en och samma launch. Utan den delade promisen startar
+// varje väntande anrop en egen Chrome, och alla utom den sista blir föräldralösa.
 async function getBrowser() {
   if (browserInstance && browserInstance.connected) return browserInstance;
-  browserInstance = await puppeteer.launch({ args: BROWSER_ARGS });
-  browserInstance.on("disconnected", () => { browserInstance = null; });
-  return browserInstance;
+  if (!browserLaunch) {
+    browserLaunch = Promise.resolve()
+      .then(launcher)
+      .then((browser) => {
+        browserInstance = browser;
+        browser.on("disconnected", () => {
+          browserInstance = null;
+          browserLaunch = null;
+        });
+        return browser;
+      })
+      .finally(() => {
+        browserLaunch = null;
+      });
+  }
+  return browserLaunch;
+}
+
+// Inject a browser instance (for testing without launching Puppeteer).
+function _setBrowserInstance(mock) {
+  browserInstance = mock;
+  browserLaunch = null;
+}
+
+// Replace the launch function (for testing the launch path without a real Chrome).
+function _setLauncher(fn) {
+  launcher = fn || (() => puppeteer.launch({ args: BROWSER_ARGS }));
 }
 
 // --- Screenshot helpers ---
@@ -159,29 +211,44 @@ async function dismissPopups(page) {
   await new Promise((r) => setTimeout(r, 150));
 }
 
-async function takeShot(browser, url, variant) {
-  const page = await browser.newPage();
-  await page.setViewport(variant.viewport);
-  await page.goto(url, { waitUntil: "networkidle2", timeout: 30000 });
-  await new Promise((r) => setTimeout(r, 500));
-  await dismissPopups(page);
-
-  if (!variant.frame) {
-    const buf = await page.screenshot({ fullPage: !!variant.fullPage });
+// Varje flik måste stängas även när goto/screenshot kastar — browsern är persistent,
+// så en läckt flik ligger kvar och äter minne resten av processens livstid.
+async function closeQuietly(page) {
+  try {
     await page.close();
-    return buf;
+  } catch {
+    /* redan stängd, eller browsern nere */
+  }
+}
+
+async function takeShot(browser, url, variant, { timeout = GOTO_TIMEOUT_MS } = {}) {
+  let b64;
+
+  const page = await browser.newPage();
+  try {
+    await guardPage(page);
+    await page.setViewport(variant.viewport);
+    await page.goto(url, { waitUntil: "networkidle2", timeout });
+    await new Promise((r) => setTimeout(r, 500));
+    await dismissPopups(page);
+    assertNoPrivateAccess(page);
+
+    if (!variant.frame) {
+      return await page.screenshot({ fullPage: !!variant.fullPage });
+    }
+    b64 = await page.screenshot({ encoding: "base64" });
+  } finally {
+    await closeQuietly(page);
   }
 
-  const b64 = await page.screenshot({ encoding: "base64" });
-  await page.close();
-
   const framePage = await browser.newPage();
-  await framePage.setViewport({
-    width: variant.frame.viewportWidth,
-    height: variant.frame.viewportHeight,
-    deviceScaleFactor: 2,
-  });
-  await framePage.setContent(`<!DOCTYPE html>
+  try {
+    await framePage.setViewport({
+      width: variant.frame.viewportWidth,
+      height: variant.frame.viewportHeight,
+      deviceScaleFactor: 2,
+    });
+    await framePage.setContent(`<!DOCTYPE html>
 <html><head><style>
   *{margin:0;padding:0}
   body{background:transparent;display:flex;align-items:center;justify-content:center;height:100vh}
@@ -190,9 +257,10 @@ async function takeShot(browser, url, variant) {
 <body>${variant.frame.html.replace("DATA", `data:image/png;base64,${b64}`)}</body>
 </html>`);
 
-  const buf = await framePage.screenshot({ omitBackground: true });
-  await framePage.close();
-  return buf;
+    return await framePage.screenshot({ omitBackground: true });
+  } finally {
+    await closeQuietly(framePage);
+  }
 }
 
 // --- Page HTML ---
@@ -243,13 +311,16 @@ function renderPage(key) {
     <div class="status" id="s" aria-live="polite"></div>
     <div class="preview" id="p"></div>
   </main>
+  <footer style="margin-top:2rem;text-align:center;font-size:0.8rem"><a href="https://status.grj.se/click" style="color:#555;text-decoration:none">Statusvakt</a></footer>
   <script>
     document.getElementById('f').onsubmit=async e=>{
       e.preventDefault();const url=document.getElementById('u').value,b=document.getElementById('b'),s=document.getElementById('s'),p=document.getElementById('p');
-      b.disabled=true;s.textContent='Tar screenshot...';p.innerHTML='';
+      b.disabled=true;s.textContent='Tar screenshot...';p.replaceChildren();
       try{const r=await fetch('${v.shotPath}?url='+encodeURIComponent(url));if(!r.ok)throw new Error(await r.text());
         const bl=await r.blob(),i=URL.createObjectURL(bl),fn=url.replace(/^https?:\\/\\//,'').replace(/[^a-zA-Z0-9]/g,'-').replace(/-+/g,'-').replace(/-$/,'')+'${v.suffix}.png';
-        p.innerHTML='<img src="'+i+'" alt="Screenshot av '+url+'"><br><a class="download" href="'+i+'" download="'+fn+'">Ladda ner</a>';s.textContent='';
+        const im=document.createElement('img');im.src=i;im.alt='Screenshot av '+url;
+        const a=document.createElement('a');a.className='download';a.href=i;a.download=fn;a.textContent='Ladda ner';
+        p.replaceChildren(im,document.createElement('br'),a);s.textContent='';
       }catch(err){s.textContent='Fel: '+err.message}b.disabled=false;
     };
   </script>
@@ -287,18 +358,64 @@ function renderAllPage() {
     <div class="status" id="s" aria-live="polite"></div>
     <div class="preview" id="p"></div>
   </main>
+  <footer style="margin-top:2rem;text-align:center;font-size:0.8rem"><a href="https://status.grj.se/click" style="color:#555;text-decoration:none">Statusvakt</a></footer>
   <script>
     document.getElementById('f').onsubmit=async e=>{
       e.preventDefault();const url=document.getElementById('u').value,b=document.getElementById('b'),s=document.getElementById('s'),p=document.getElementById('p');
-      b.disabled=true;s.textContent='Tar screenshots (kan ta en stund)...';p.innerHTML='';
+      b.disabled=true;s.textContent='Tar screenshots (kan ta en stund)...';p.replaceChildren();
       try{const r=await fetch('/shot/all?url='+encodeURIComponent(url));if(!r.ok)throw new Error(await r.text());
         const bl=await r.blob(),z=URL.createObjectURL(bl),fn=url.replace(/^https?:\\/\\//,'').replace(/[^a-zA-Z0-9]/g,'-').replace(/-+/g,'-').replace(/-$/,'')+'.zip';
-        p.innerHTML='<a class="download" href="'+z+'" download="'+fn+'">Ladda ner ZIP</a>';s.textContent='';
+        const a=document.createElement('a');a.className='download';a.href=z;a.download=fn;a.textContent='Ladda ner ZIP';
+        p.replaceChildren(a);s.textContent='';
       }catch(err){s.textContent='Fel: '+err.message}b.disabled=false;
     };
   </script>
 </body></html>`;
 }
+
+// --- Health endpoint ---
+
+app.get("/health", async (req, res) => {
+  const checks = {};
+  let healthy = true;
+
+  // Browser check
+  try {
+    const browser = await getBrowser();
+    if (browser && browser.connected) {
+      checks.browser = "ok";
+    } else {
+      checks.browser = { status: "error", message: "Browser ej ansluten" };
+      healthy = false;
+    }
+  } catch (err) {
+    console.error("[health] browser:", err);
+    checks.browser = { status: "error", message: publicMessage(err) };
+    healthy = false;
+  }
+
+  // Error rate check
+  const errorCount = getErrorRate();
+  if (errorCount <= ERROR_THRESHOLD) {
+    checks.error_rate = { status: "ok", errors_last_5min: errorCount, threshold: ERROR_THRESHOLD };
+  } else {
+    checks.error_rate = {
+      status: "elevated",
+      errors_last_5min: errorCount,
+      threshold: ERROR_THRESHOLD,
+      message: `${errorCount} fel senaste 5 minuterna`,
+    };
+    healthy = false;
+  }
+
+  const status = healthy ? "ok" : "error";
+  res.status(healthy ? 200 : 503).json({
+    status,
+    uptime: Math.floor((Date.now() - startedAt) / 1000),
+    version: "1.0.0",
+    checks,
+  });
+});
 
 // --- Routes ---
 
@@ -307,13 +424,17 @@ for (const key of VARIANT_KEYS) {
 
   app.get(v.path, (req, res) => res.send(renderPage(key)));
 
-  app.get(v.shotPath, async (req, res) => {
+  app.get(v.shotPath, rateLimit, async (req, res) => {
     const url = req.query.url;
     if (!url) return res.status(400).send("url krävs");
+    const verdict = await validateTargetUrl(url);
+    if (!verdict.ok) return res.status(400).send(verdict.reason);
 
     try {
-      const browser = await getBrowser();
-      const screenshot = await takeShot(browser, url, v);
+      const screenshot = await withSlot(async () => {
+        const browser = await getBrowser();
+        return takeShot(browser, url, v);
+      });
 
       const filename = urlToFilename(url);
       res.set("Content-Type", "image/png");
@@ -322,39 +443,72 @@ for (const key of VARIANT_KEYS) {
       }
       res.send(screenshot);
     } catch (err) {
-      res.status(500).send(err.message);
+      if (err.busy) return res.status(429).send(err.message);
+      console.error(`[shot${v.suffix}]`, err);
+      recordError();
+      res.status(500).send(publicMessage(err));
     }
   });
 }
 
 app.get("/all", (req, res) => res.send(renderAllPage()));
 
-app.get("/shot/all", async (req, res) => {
+app.get("/shot/all", rateLimit, async (req, res) => {
   const url = req.query.url;
   if (!url) return res.status(400).send("url krävs");
+  const verdict = await validateTargetUrl(url);
+  if (!verdict.ok) return res.status(400).send(verdict.reason);
 
   try {
-    const browser = await getBrowser();
+    const shots = await withSlot(async () => {
+      const browser = await getBrowser();
+      const results = [];
+      for (const key of VARIANT_KEYS) {
+        results.push(await takeShot(browser, url, VARIANTS[key], { timeout: ALL_GOTO_TIMEOUT_MS }));
+      }
+      return results;
+    });
 
-    const shots = await Promise.all(
-      VARIANT_KEYS.map((key) => takeShot(browser, url, VARIANTS[key]))
-    );
-
+    // Alla bilder är klara här — först nu skickas headers, så fel ovanför kan
+    // fortfarande bli ett vanligt 500-svar.
     const filename = urlToFilename(url);
     res.set("Content-Type", "application/zip");
     res.set("Content-Disposition", `attachment; filename="${filename}.zip"`);
 
     const archive = archiver("zip");
+    archive.on("error", (err) => {
+      console.error("[shot/all] arkivfel:", err);
+      recordError();
+      res.destroy(err);
+    });
     archive.pipe(res);
     VARIANT_KEYS.forEach((key, i) => {
-      archive.append(shots[i], { name: `${filename}${VARIANTS[key].suffix}.png` });
+      // page.screenshot() ger en Uint8Array; archiver tar bara Buffer eller Stream.
+      archive.append(Buffer.from(shots[i]), { name: `${filename}${VARIANTS[key].suffix}.png` });
     });
     await archive.finalize();
   } catch (err) {
-    res.status(500).send(err.message);
+    if (err.busy) return res.status(429).send(err.message);
+    console.error("[shot/all]", err);
+    recordError();
+    // Strömmen kan redan ha börjat — då finns ingen statuskod kvar att sätta.
+    if (res.headersSent) return res.destroy(err);
+    res.status(500).send(publicMessage(err));
   }
 });
 
-app.listen(PORT, "0.0.0.0", () => {
-  console.log(`Click running at http://localhost:${PORT}`);
-});
+// Start server only when run directly (not when required for testing).
+if (require.main === module) {
+  app.listen(PORT, HOST, () => {
+    console.log(`Click running at http://${HOST}:${PORT}`);
+  });
+}
+
+module.exports = {
+  app,
+  getBrowser,
+  takeShot,
+  urlToFilename,
+  _setBrowserInstance,
+  _setLauncher,
+};
