@@ -303,111 +303,92 @@ function navLinks(currentKey) {
     .join(" · ");
 }
 
-function renderPage(key) {
+// Sidorna skiljer sig bara i titel, bookmarklet och vad knappen gör. En mall,
+// en konfigurationspost per sida — tidigare var det två nästan identiska kopior.
+const DESC_SINGLE =
+  "Ta screenshots av websidor i olika format. Desktop, mobil, iPad, stor och helsida.";
+const DESC_ALL = "Ta screenshots av websidor i alla format på en gång. Ladda ner som ZIP.";
+
+function pageSpec(key) {
+  if (key === "all") {
+    return {
+      title: "Click All",
+      emoji: "📦",
+      desc: DESC_ALL,
+      path: "/all",
+      shotPath: "/shot/all",
+      imgStyle: null,      // ingen bild på sidan
+      dl: false,           // /shot/all svarar alltid attachment, ?dl vore brus
+      bookmarkletHint: "ta alla screenshots av aktuell sida",
+      buttonLabel: "Ta alla screenshots",
+      buttonHint: "Ta screenshots i alla format och ladda ner som ZIP",
+      busy: "Tar screenshots (kan ta en stund)...",
+      mode: "zip",
+      fallbackName: "screenshots.zip",
+    };
+  }
   const v = VARIANTS[key];
-  const imgStyle = v.tall ? "max-height:70vh;" : "max-width:100%;";
-  const desc = "Ta screenshots av websidor i olika format. Desktop, mobil, iPad, stor och helsida.";
-  const url = `${BASE_URL}${v.path}`;
+  const hint = v.hint.toLowerCase();
+  return {
+    title: v.title,
+    emoji: v.emoji,
+    desc: DESC_SINGLE,
+    path: v.path,
+    shotPath: v.shotPath,
+    imgStyle: v.tall ? "max-height:70vh;" : "max-width:100%;",
+    dl: true,
+    bookmarkletHint: `ta ${hint}-screenshot av aktuell sida`,
+    buttonLabel: "Ta screenshot",
+    buttonHint: `Ta en ${hint}-screenshot`,
+    busy: "Tar screenshot...",
+    mode: "image",
+    fallbackName: `screenshot${v.suffix}.png`,
+  };
+}
+
+function renderPage(key) {
+  const p = pageSpec(key);
+  const url = `${BASE_URL}${p.path}`;
+  // Escapa < så att ett värde aldrig kan stänga script-taggen tidigt.
+  const clientConfig = JSON.stringify({
+    shotPath: p.shotPath,
+    mode: p.mode,
+    busy: p.busy,
+    fallbackName: p.fallbackName,
+  }).replace(/</g, "\\u003c");
+
   return `<!DOCTYPE html>
 <html lang="sv">
 <head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${v.title}</title>
-  <meta name="description" content="${desc}">
-  <meta property="og:title" content="${v.title}">
-  <meta property="og:description" content="${desc}">
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${p.title}</title>
+  <meta name="description" content="${p.desc}">
+  <meta property="og:title" content="${p.title}">
+  <meta property="og:description" content="${p.desc}">
   <meta property="og:image" content="${BASE_URL}/og.png">
   <meta property="og:url" content="${url}">
   <meta property="og:type" content="website">
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="${v.title}">
-  <meta name="twitter:description" content="${desc}">
+  <meta name="twitter:title" content="${p.title}">
+  <meta name="twitter:description" content="${p.desc}">
   <meta name="twitter:image" content="${BASE_URL}/og.png">
   <link rel="canonical" href="${url}">
-  <style>${STYLE} .preview img{${imgStyle}}</style>${ANALYTICS}
+  <style>${STYLE}${p.imgStyle ? ` .preview img{${p.imgStyle}}` : ""}</style>${ANALYTICS}
 </head>
 <body>
   <main class="container">
-    <h1><span style="font-size:4rem" aria-hidden="true">${v.emoji}</span><br>${v.title}</h1>
+    <h1><span style="font-size:4rem" aria-hidden="true">${p.emoji}</span><br>${p.title}</h1>
     <nav aria-label="Varianter">${navLinks(key)}</nav>
     <div style="margin-top:1.5rem;margin-bottom:1.5rem">
       <p style="color:#aaa;margin-bottom:0.5rem;font-size:0.85rem">Dra till bokmärkesfältet:</p>
-      <a href="javascript:void(window.location='https://click.grj.se${v.shotPath}?dl&url='+encodeURIComponent(location.href))" style="display:inline-block;padding:0.4rem 0.8rem;background:#d03050;color:#fff;border-radius:6px;text-decoration:none;font-weight:500;font-size:0.85rem" title="Bookmarklet: ta ${v.hint.toLowerCase()}-screenshot av aktuell sida">${v.title}</a>
+      <a href="javascript:void(window.location='${BASE_URL}${p.shotPath}?${p.dl ? "dl&" : ""}url='+encodeURIComponent(location.href))" style="display:inline-block;padding:0.4rem 0.8rem;background:#d03050;color:#fff;border-radius:6px;text-decoration:none;font-weight:500;font-size:0.85rem" title="Bookmarklet: ${p.bookmarkletHint}">${p.title}</a>
     </div>
-    <form id="f"><label for="u">URL</label><input type="url" id="u" placeholder="https://example.com" required><button id="b" title="Ta en ${v.hint.toLowerCase()}-screenshot">Ta screenshot</button></form>
+    <form id="f"><label for="u">URL</label><input type="url" id="u" placeholder="https://example.com" required><button id="b" title="${p.buttonHint}">${p.buttonLabel}</button></form>
     <div class="status" id="s" aria-live="polite"></div>
     <div class="preview" id="p"></div>
   </main>
   <footer style="margin-top:2rem;text-align:center;font-size:0.8rem"><a href="https://status.grj.se/click" style="color:#555;text-decoration:none">Statusvakt</a></footer>
-  <script>
-    // Servern äger filnamnet och skickar det i Content-Disposition. Klienten läser
-    // tillbaka det istället för att bygga ett eget — annars glider de isär.
-    function nameFrom(r,fallback){
-      const m=(r.headers.get('content-disposition')||'').match(/filename="([^"]+)"/);
-      return m?m[1]:fallback;
-    }
-    document.getElementById('f').onsubmit=async e=>{
-      e.preventDefault();const url=document.getElementById('u').value,b=document.getElementById('b'),s=document.getElementById('s'),p=document.getElementById('p');
-      b.disabled=true;s.textContent='Tar screenshot...';p.replaceChildren();
-      try{const r=await fetch('${v.shotPath}?url='+encodeURIComponent(url));if(!r.ok)throw new Error(await r.text());
-        const bl=await r.blob(),i=URL.createObjectURL(bl),fn=nameFrom(r,'screenshot${v.suffix}.png');
-        const im=document.createElement('img');im.src=i;im.alt='Screenshot av '+url;
-        const a=document.createElement('a');a.className='download';a.href=i;a.download=fn;a.textContent='Ladda ner';
-        p.replaceChildren(im,document.createElement('br'),a);s.textContent='';
-      }catch(err){s.textContent='Fel: '+err.message}b.disabled=false;
-    };
-  </script>
-</body></html>`;
-}
-
-function renderAllPage() {
-  const desc = "Ta screenshots av websidor i alla format på en gång. Ladda ner som ZIP.";
-  return `<!DOCTYPE html>
-<html lang="sv">
-<head>
-  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Click All</title>
-  <meta name="description" content="${desc}">
-  <meta property="og:title" content="Click All">
-  <meta property="og:description" content="${desc}">
-  <meta property="og:image" content="${BASE_URL}/og.png">
-  <meta property="og:url" content="${BASE_URL}/all">
-  <meta property="og:type" content="website">
-  <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="Click All">
-  <meta name="twitter:description" content="${desc}">
-  <meta name="twitter:image" content="${BASE_URL}/og.png">
-  <link rel="canonical" href="${BASE_URL}/all">
-  <style>${STYLE}</style>${ANALYTICS}
-</head>
-<body>
-  <main class="container">
-    <h1><span style="font-size:4rem" aria-hidden="true">📦</span><br>Click All</h1>
-    <nav aria-label="Varianter">${navLinks("all")}</nav>
-    <div style="margin-top:1.5rem;margin-bottom:1.5rem">
-      <p style="color:#aaa;margin-bottom:0.5rem;font-size:0.85rem">Dra till bokmärkesfältet:</p>
-      <a href="javascript:void(window.location='https://click.grj.se/shot/all?url='+encodeURIComponent(location.href))" style="display:inline-block;padding:0.4rem 0.8rem;background:#d03050;color:#fff;border-radius:6px;text-decoration:none;font-weight:500;font-size:0.85rem" title="Bookmarklet: ta alla screenshots av aktuell sida">Click All</a>
-    </div>
-    <form id="f"><label for="u">URL</label><input type="url" id="u" placeholder="https://example.com" required><button id="b" title="Ta screenshots i alla format och ladda ner som ZIP">Ta alla screenshots</button></form>
-    <div class="status" id="s" aria-live="polite"></div>
-    <div class="preview" id="p"></div>
-  </main>
-  <footer style="margin-top:2rem;text-align:center;font-size:0.8rem"><a href="https://status.grj.se/click" style="color:#555;text-decoration:none">Statusvakt</a></footer>
-  <script>
-    // Servern äger filnamnet och skickar det i Content-Disposition. Klienten läser
-    // tillbaka det istället för att bygga ett eget — annars glider de isär.
-    function nameFrom(r,fallback){
-      const m=(r.headers.get('content-disposition')||'').match(/filename="([^"]+)"/);
-      return m?m[1]:fallback;
-    }
-    document.getElementById('f').onsubmit=async e=>{
-      e.preventDefault();const url=document.getElementById('u').value,b=document.getElementById('b'),s=document.getElementById('s'),p=document.getElementById('p');
-      b.disabled=true;s.textContent='Tar screenshots (kan ta en stund)...';p.replaceChildren();
-      try{const r=await fetch('/shot/all?url='+encodeURIComponent(url));if(!r.ok)throw new Error(await r.text());
-        const bl=await r.blob(),z=URL.createObjectURL(bl),fn=nameFrom(r,'screenshots.zip');
-        const a=document.createElement('a');a.className='download';a.href=z;a.download=fn;a.textContent='Ladda ner ZIP';
-        p.replaceChildren(a);s.textContent='';
-      }catch(err){s.textContent='Fel: '+err.message}b.disabled=false;
-    };
-  </script>
+  <script id="cfg" type="application/json">${clientConfig}</script>
+  <script src="/app.js"></script>
 </body></html>`;
 }
 
@@ -490,7 +471,7 @@ for (const key of VARIANT_KEYS) {
   });
 }
 
-app.get("/all", (req, res) => res.send(renderAllPage()));
+app.get("/all", (req, res) => res.send(renderPage("all")));
 
 app.get("/shot/all", rateLimit, async (req, res) => {
   const url = req.query.url;
