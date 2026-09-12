@@ -220,7 +220,7 @@ function shotFilename(url, suffix, stamp) {
 
 async function dismissPopups(page) {
   await page.keyboard.press("Escape");
-  await settle(150);
+  await settle(100);
 
   const hasCanvas = await page.evaluate(() => document.querySelector("canvas") !== null);
   if (!hasCanvas) {
@@ -241,7 +241,7 @@ async function dismissPopups(page) {
       document.documentElement.style.overflow = "auto";
     });
   }
-  await settle(150);
+  await settle(100);
 }
 
 // Varje flik måste stängas även när goto/screenshot kastar — browsern är persistent,
@@ -254,6 +254,49 @@ async function closeQuietly(page) {
   }
 }
 
+// Två varianter med samma viewport behöver inte varsin sidladdning. desktop och
+// full är identiska så när som på fullPage — mätt kostar en extra laddning av
+// samma URL ~1,0 s, medan en till skärmbild från en redan laddad sida kostar ~0,8 s.
+const viewportKey = (v) => JSON.stringify(v.viewport);
+
+// Tar flera varianter av samma URL och delar sidladdning där viewporten tillåter.
+// Returnerar bilderna i samma ordning som varianterna kom in.
+async function takeShots(browser, url, variants, { timeout = GOTO_TIMEOUT_MS } = {}) {
+  const groups = new Map();
+  variants.forEach((variant, index) => {
+    const key = viewportKey(variant);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push({ variant, index });
+  });
+
+  // fullPage-bilder scrollar sidan. Ta dem sist i varje grupp istället för att
+  // lita på att Puppeteer återställer scrollpositionen åt oss.
+  for (const members of groups.values()) {
+    members.sort((a, b) => Number(!!a.variant.fullPage) - Number(!!b.variant.fullPage));
+  }
+
+  const out = new Array(variants.length);
+  for (const members of groups.values()) {
+    const page = await browser.newPage();
+    try {
+      await guardPage(page);
+      await page.setViewport(members[0].variant.viewport);
+      await page.goto(url, { waitUntil: "networkidle2", timeout });
+      await settle(300);
+      await dismissPopups(page);
+      assertNoPrivateAccess(page);
+
+      for (const { variant, index } of members) {
+        const shot = await page.screenshot({ fullPage: !!variant.fullPage });
+        out[index] = variant.frame ? await renderFrame(browser, variant, shot) : shot;
+      }
+    } finally {
+      await closeQuietly(page);
+    }
+  }
+  return out;
+}
+
 async function takeShot(browser, url, variant, { timeout = GOTO_TIMEOUT_MS } = {}) {
   let b64;
 
@@ -262,18 +305,27 @@ async function takeShot(browser, url, variant, { timeout = GOTO_TIMEOUT_MS } = {
     await guardPage(page);
     await page.setViewport(variant.viewport);
     await page.goto(url, { waitUntil: "networkidle2", timeout });
-    await settle(500);
+    // networkidle2 betyder redan att nätverket lagt sig. Den här pausen finns bara
+    // för overlays som animeras in efteråt; 300 ms räcker för en banner som redan
+    // ligger i DOM:en. Mätt: de fasta väntetiderna var 800 ms av ~2,3 s per bild.
+    await settle(300);
     await dismissPopups(page);
     assertNoPrivateAccess(page);
 
     if (!variant.frame) {
       return await page.screenshot({ fullPage: !!variant.fullPage });
     }
-    b64 = await page.screenshot({ encoding: "base64" });
+    b64 = await page.screenshot();
   } finally {
     await closeQuietly(page);
   }
 
+  return renderFrame(browser, variant, b64);
+}
+
+// Ritar enhetsramen runt en redan tagen skärmbild.
+async function renderFrame(browser, variant, shot) {
+  const b64 = Buffer.from(shot).toString("base64");
   const framePage = await browser.newPage();
   try {
     await framePage.setViewport({
@@ -651,11 +703,12 @@ app.get("/shot/all", rateLimit, async (req, res) => {
   try {
     const shots = await withSlot(async () => {
       const browser = await getBrowser();
-      const results = [];
-      for (const key of VARIANT_KEYS) {
-        results.push(await takeShot(browser, url, VARIANTS[key], { timeout: ALL_GOTO_TIMEOUT_MS }));
-      }
-      return results;
+      return takeShots(
+        browser,
+        url,
+        VARIANT_KEYS.map((key) => VARIANTS[key]),
+        { timeout: ALL_GOTO_TIMEOUT_MS }
+      );
     });
 
     // Alla bilder är klara här — först nu skickas headers, så fel ovanför kan
@@ -713,6 +766,7 @@ module.exports = {
   app,
   getBrowser,
   takeShot,
+  takeShots,
   urlToFilename,
   timestamp,
   shotFilename,

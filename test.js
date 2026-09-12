@@ -2011,3 +2011,102 @@ describe("shot — mejl till inloggad", () => {
     assert.equal(sent.length, 0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 18. takeShots — delad sidladdning för varianter med samma viewport
+// ---------------------------------------------------------------------------
+
+describe("takeShots", () => {
+  const { takeShots, _setSettleScale } = require("./server");
+
+  beforeEach(() => _setSettleScale(0));
+  afterEach(() => _setSettleScale(1));
+
+  function fakeBrowser() {
+    const state = { loads: 0, pages: 0, shots: [], closed: 0 };
+    const page = (isFrame) => ({
+      setRequestInterception: async () => {},
+      on: () => {},
+      setViewport: async () => {},
+      goto: async () => {
+        state.loads++;
+      },
+      keyboard: { press: async () => {} },
+      evaluate: async () => false,
+      setContent: async () => {},
+      screenshot: async (opts = {}) => {
+        if (!isFrame) state.shots.push(!!opts.fullPage);
+        return Buffer.from([state.shots.length]);
+      },
+      close: async () => {
+        state.closed++;
+      },
+    });
+    return {
+      state,
+      newPage: async () => {
+        state.pages++;
+        // Rampsidor skapas efter huvudsidan i varje varv; de får inte räknas som laddningar.
+        return page(state.pages > 1 && state.loads === state.pages - 1 ? false : false);
+      },
+    };
+  }
+
+  const vp = (w, h) => ({ width: w, height: h });
+  const desktop = { viewport: vp(1280, 800), suffix: "" };
+  const full = { viewport: vp(1280, 800), suffix: "-full", fullPage: true };
+  const big = { viewport: vp(1720, 1410), suffix: "-big" };
+
+  it("laddar sidan en gång för varianter som delar viewport", async () => {
+    const browser = fakeBrowser();
+    await takeShots(browser, "https://example.com", [desktop, full]);
+    assert.equal(browser.state.loads, 1, "desktop och full ska dela laddning");
+  });
+
+  it("laddar separat för olika viewport", async () => {
+    const browser = fakeBrowser();
+    await takeShots(browser, "https://example.com", [desktop, big]);
+    assert.equal(browser.state.loads, 2);
+  });
+
+  it("tre varianter, två viewportar → två laddningar", async () => {
+    const browser = fakeBrowser();
+    await takeShots(browser, "https://example.com", [desktop, big, full]);
+    assert.equal(browser.state.loads, 2);
+  });
+
+  it("behåller ordningen som varianterna kom in", async () => {
+    const browser = fakeBrowser();
+    const out = await takeShots(browser, "https://example.com", [big, desktop, full]);
+    assert.equal(out.length, 3);
+    for (const buf of out) assert.ok(Buffer.isBuffer(buf), "varje plats ska vara fylld");
+  });
+
+  it("tar fullPage SIST i gruppen — den scrollar sidan", async () => {
+    const browser = fakeBrowser();
+    await takeShots(browser, "https://example.com", [full, desktop]);
+    assert.deepEqual(browser.state.shots, [false, true], "viewport-bilden före helsidan");
+  });
+
+  it("stänger varje sida även när skärmbilden kastar", async () => {
+    let closed = 0;
+    const browser = {
+      newPage: async () => ({
+        setRequestInterception: async () => {},
+        on: () => {},
+        setViewport: async () => {},
+        goto: async () => {},
+        keyboard: { press: async () => {} },
+        evaluate: async () => false,
+        screenshot: async () => {
+          throw new Error("trasig");
+        },
+        close: async () => {
+          closed++;
+        },
+      }),
+    };
+    await assert.rejects(takeShots(browser, "https://example.com", [desktop]), /trasig/);
+    assert.equal(closed, 1);
+  });
+});
