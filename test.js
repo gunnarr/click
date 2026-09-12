@@ -1181,3 +1181,136 @@ describe("guard — publicMessage", () => {
     assert.ok(publicMessage(new Error("x".repeat(1000))).length <= 300);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 13. Filnamn — tidsstämplade och byggda på ett enda ställe
+// ---------------------------------------------------------------------------
+
+describe("timestamp", () => {
+  const { timestamp } = require("./server");
+
+  it("formaterar som YYYYMMDD-HHMMSS i lokal tid", () => {
+    assert.equal(timestamp(new Date(2026, 8, 12, 10, 45, 30)), "20260912-104530");
+  });
+
+  it("nollutfyller ensiffriga delar", () => {
+    assert.equal(timestamp(new Date(2026, 0, 5, 9, 8, 7)), "20260105-090807");
+  });
+
+  it("hanterar midnatt", () => {
+    assert.equal(timestamp(new Date(2026, 11, 31, 0, 0, 0)), "20261231-000000");
+  });
+
+  it("matchar formen även utan argument", () => {
+    assert.match(timestamp(), /^\d{8}-\d{6}$/);
+  });
+});
+
+describe("shotFilename", () => {
+  const { shotFilename } = require("./server");
+  const stamp = "20260912-104530";
+
+  it("bygger namnet Gunnar bad om", () => {
+    assert.equal(
+      shotFilename("https://www.svt.se/", "-big", stamp),
+      "www-svt-se-big-20260912-104530.png"
+    );
+  });
+
+  it("desktop har ingen variantsuffix", () => {
+    assert.equal(
+      shotFilename("https://example.com", "", stamp),
+      "example-com-20260912-104530.png"
+    );
+  });
+
+  it("sajtnamnet står först, tidsstämpeln sist", () => {
+    const name = shotFilename("https://example.com/a/b?q=1", "-mobile", stamp);
+    assert.ok(name.startsWith("example-com"), "namnet ska inledas med sajten");
+    assert.ok(name.endsWith(`${stamp}.png`), "tidsstämpeln ska ligga sist");
+  });
+
+  it("innehåller bara tecken som är säkra i ett filnamn", () => {
+    const name = shotFilename("https://ex.com/å ä ö?q=<>&", "-full", stamp);
+    assert.match(name, /^[a-zA-Z0-9.-]+$/);
+  });
+
+  it("två dumpar av samma sida vid olika tid krockar inte", () => {
+    const a = shotFilename("https://example.com", "", "20260912-104530");
+    const b = shotFilename("https://example.com", "", "20260912-104531");
+    assert.notEqual(a, b);
+  });
+});
+
+describe("Content-Disposition — servern äger filnamnet", () => {
+  const { app, _setBrowserInstance, _setLauncher, _setSettleScale } = require("./server");
+  const { _internals } = require("./guard");
+
+  const HOST = "filename-test.example";
+  let server;
+  let baseUrl;
+
+  // Minimal page-stub: takeShot behöver bara de här metoderna.
+  const fakePage = () => ({
+    setRequestInterception: async () => {},
+    on: () => {},
+    setViewport: async () => {},
+    goto: async () => {},
+    keyboard: { press: async () => {} },
+    evaluate: async () => false,
+    screenshot: async () => Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+    close: async () => {},
+  });
+
+  beforeEach(async () => {
+    _setSettleScale(0); // hoppa över de fasta väntetiderna
+    _setLauncher(async () => {
+      throw new Error("ingen riktig browser i det här testet");
+    });
+    _setBrowserInstance({ connected: true, newPage: async () => fakePage() });
+    // Seedad DNS så testet aldrig gör en riktig uppslagning.
+    _internals.dnsCache.set(HOST, { ok: true, expires: Date.now() + 60_000 });
+    await new Promise((resolve) => {
+      server = app.listen(0, "127.0.0.1", () => {
+        baseUrl = `http://127.0.0.1:${server.address().port}`;
+        resolve();
+      });
+    });
+  });
+
+  afterEach(async () => {
+    _setSettleScale(1);
+    _setBrowserInstance(null);
+    _setLauncher(null);
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  function head(path) {
+    return new Promise((resolve, reject) => {
+      http
+        .get(`${baseUrl}${path}`, (res) => {
+          res.resume();
+          res.on("end", () =>
+            resolve({ status: res.statusCode, disposition: res.headers["content-disposition"] })
+          );
+        })
+        .on("error", reject);
+    });
+  }
+
+  it("sätter namnet även utan ?dl, så klienten kan läsa det", async () => {
+    const { status, disposition } = await head(`/shot?url=https://${HOST}/`);
+    assert.equal(status, 200);
+    assert.match(disposition, /^inline; filename="filename-test-example-\d{8}-\d{6}\.png"$/);
+  });
+
+  it("växlar till attachment med ?dl", async () => {
+    const { disposition } = await head(`/shot?url=https://${HOST}/&dl`);
+    assert.match(disposition, /^attachment; filename=".*\.png"$/);
+  });
+
+  it("varianten hamnar före tidsstämpeln", async () => {
+    const { disposition } = await head(`/shot/big?url=https://${HOST}/`);
+    assert.match(disposition, /filename="filename-test-example-big-\d{8}-\d{6}\.png"/);
+  });
+});

@@ -181,13 +181,39 @@ function _setLauncher(fn) {
 
 // --- Screenshot helpers ---
 
+// Sidor behöver en stund på sig att sätta sig efter navigering och popup-städning.
+// Skalan finns för att testerna inte ska betala den väntan på riktigt.
+let settleScale = 1;
+const settle = (ms) => new Promise((r) => setTimeout(r, ms * settleScale));
+
+// Set to 0 in tests to skip the fixed post-navigation waits.
+function _setSettleScale(scale) {
+  settleScale = scale;
+}
+
 function urlToFilename(url) {
   return url.replace(/^https?:\/\//, "").replace(/[^a-zA-Z0-9]/g, "-").replace(/-+/g, "-").replace(/-$/, "");
 }
 
+// Lokal tid, sorterbar: 20260912-104530. Utan den skriver två dumpar av samma sida
+// över varandra i hämtningsmappen.
+function timestamp(date = new Date()) {
+  const p = (n) => String(n).padStart(2, "0");
+  return (
+    `${date.getFullYear()}${p(date.getMonth() + 1)}${p(date.getDate())}` +
+    `-${p(date.getHours())}${p(date.getMinutes())}${p(date.getSeconds())}`
+  );
+}
+
+// Sajtnamnet först — det är den delen man känner igen filen på när den ligger som
+// bilaga. Tidsstämpeln sist ger unikhet utan att alla filer ser likadana ut i början.
+function shotFilename(url, suffix, stamp) {
+  return `${urlToFilename(url)}${suffix}-${stamp}.png`;
+}
+
 async function dismissPopups(page) {
   await page.keyboard.press("Escape");
-  await new Promise((r) => setTimeout(r, 150));
+  await settle(150);
 
   const hasCanvas = await page.evaluate(() => document.querySelector("canvas") !== null);
   if (!hasCanvas) {
@@ -208,7 +234,7 @@ async function dismissPopups(page) {
       document.documentElement.style.overflow = "auto";
     });
   }
-  await new Promise((r) => setTimeout(r, 150));
+  await settle(150);
 }
 
 // Varje flik måste stängas även när goto/screenshot kastar — browsern är persistent,
@@ -229,7 +255,7 @@ async function takeShot(browser, url, variant, { timeout = GOTO_TIMEOUT_MS } = {
     await guardPage(page);
     await page.setViewport(variant.viewport);
     await page.goto(url, { waitUntil: "networkidle2", timeout });
-    await new Promise((r) => setTimeout(r, 500));
+    await settle(500);
     await dismissPopups(page);
     assertNoPrivateAccess(page);
 
@@ -313,11 +339,17 @@ function renderPage(key) {
   </main>
   <footer style="margin-top:2rem;text-align:center;font-size:0.8rem"><a href="https://status.grj.se/click" style="color:#555;text-decoration:none">Statusvakt</a></footer>
   <script>
+    // Servern äger filnamnet och skickar det i Content-Disposition. Klienten läser
+    // tillbaka det istället för att bygga ett eget — annars glider de isär.
+    function nameFrom(r,fallback){
+      const m=(r.headers.get('content-disposition')||'').match(/filename="([^"]+)"/);
+      return m?m[1]:fallback;
+    }
     document.getElementById('f').onsubmit=async e=>{
       e.preventDefault();const url=document.getElementById('u').value,b=document.getElementById('b'),s=document.getElementById('s'),p=document.getElementById('p');
       b.disabled=true;s.textContent='Tar screenshot...';p.replaceChildren();
       try{const r=await fetch('${v.shotPath}?url='+encodeURIComponent(url));if(!r.ok)throw new Error(await r.text());
-        const bl=await r.blob(),i=URL.createObjectURL(bl),fn=url.replace(/^https?:\\/\\//,'').replace(/[^a-zA-Z0-9]/g,'-').replace(/-+/g,'-').replace(/-$/,'')+'${v.suffix}.png';
+        const bl=await r.blob(),i=URL.createObjectURL(bl),fn=nameFrom(r,'screenshot${v.suffix}.png');
         const im=document.createElement('img');im.src=i;im.alt='Screenshot av '+url;
         const a=document.createElement('a');a.className='download';a.href=i;a.download=fn;a.textContent='Ladda ner';
         p.replaceChildren(im,document.createElement('br'),a);s.textContent='';
@@ -360,11 +392,17 @@ function renderAllPage() {
   </main>
   <footer style="margin-top:2rem;text-align:center;font-size:0.8rem"><a href="https://status.grj.se/click" style="color:#555;text-decoration:none">Statusvakt</a></footer>
   <script>
+    // Servern äger filnamnet och skickar det i Content-Disposition. Klienten läser
+    // tillbaka det istället för att bygga ett eget — annars glider de isär.
+    function nameFrom(r,fallback){
+      const m=(r.headers.get('content-disposition')||'').match(/filename="([^"]+)"/);
+      return m?m[1]:fallback;
+    }
     document.getElementById('f').onsubmit=async e=>{
       e.preventDefault();const url=document.getElementById('u').value,b=document.getElementById('b'),s=document.getElementById('s'),p=document.getElementById('p');
       b.disabled=true;s.textContent='Tar screenshots (kan ta en stund)...';p.replaceChildren();
       try{const r=await fetch('/shot/all?url='+encodeURIComponent(url));if(!r.ok)throw new Error(await r.text());
-        const bl=await r.blob(),z=URL.createObjectURL(bl),fn=url.replace(/^https?:\\/\\//,'').replace(/[^a-zA-Z0-9]/g,'-').replace(/-+/g,'-').replace(/-$/,'')+'.zip';
+        const bl=await r.blob(),z=URL.createObjectURL(bl),fn=nameFrom(r,'screenshots.zip');
         const a=document.createElement('a');a.className='download';a.href=z;a.download=fn;a.textContent='Ladda ner ZIP';
         p.replaceChildren(a);s.textContent='';
       }catch(err){s.textContent='Fel: '+err.message}b.disabled=false;
@@ -436,11 +474,12 @@ for (const key of VARIANT_KEYS) {
         return takeShot(browser, url, v);
       });
 
-      const filename = urlToFilename(url);
+      // Namnet sätts alltid här, även utan ?dl — klienten läser tillbaka det ur headern
+      // istället för att bygga ett eget. Ett ställe, inga kopior som glider isär.
+      const filename = shotFilename(url, v.suffix, timestamp());
+      const disposition = req.query.dl !== undefined ? "attachment" : "inline";
       res.set("Content-Type", "image/png");
-      if (req.query.dl !== undefined) {
-        res.set("Content-Disposition", `attachment; filename="${filename}${v.suffix}.png"`);
-      }
+      res.set("Content-Disposition", `${disposition}; filename="${filename}"`);
       res.send(screenshot);
     } catch (err) {
       if (err.busy) return res.status(429).send(err.message);
@@ -471,9 +510,11 @@ app.get("/shot/all", rateLimit, async (req, res) => {
 
     // Alla bilder är klara här — först nu skickas headers, så fel ovanför kan
     // fortfarande bli ett vanligt 500-svar.
-    const filename = urlToFilename(url);
+    // Alla fem bilderna delar en tidsstämpel — de hör till samma tillfälle.
+    const stamp = timestamp();
+    const base = urlToFilename(url);
     res.set("Content-Type", "application/zip");
-    res.set("Content-Disposition", `attachment; filename="${filename}.zip"`);
+    res.set("Content-Disposition", `attachment; filename="${base}-${stamp}.zip"`);
 
     const archive = archiver("zip");
     archive.on("error", (err) => {
@@ -484,7 +525,9 @@ app.get("/shot/all", rateLimit, async (req, res) => {
     archive.pipe(res);
     VARIANT_KEYS.forEach((key, i) => {
       // page.screenshot() ger en Uint8Array; archiver tar bara Buffer eller Stream.
-      archive.append(Buffer.from(shots[i]), { name: `${filename}${VARIANTS[key].suffix}.png` });
+      archive.append(Buffer.from(shots[i]), {
+        name: shotFilename(url, VARIANTS[key].suffix, stamp),
+      });
     });
     await archive.finalize();
   } catch (err) {
@@ -509,6 +552,9 @@ module.exports = {
   getBrowser,
   takeShot,
   urlToFilename,
+  timestamp,
+  shotFilename,
+  _setSettleScale,
   _setBrowserInstance,
   _setLauncher,
 };
