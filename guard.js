@@ -160,7 +160,8 @@ function rateLimit(req, res, next) {
   next();
 }
 
-// Global samtidighetsgräns — avvisar hellre än köar (Mac Pro 2013, 2 GB VRAM).
+// Global samtidighetsgräns — avvisar hellre än köar. Varje Chrome-flik kostar minne
+// och GPU, och maskinen har mer nytta av att svara 429 än av att svälla.
 const MAX_CONCURRENT = 3;
 let activeSlots = 0;
 
