@@ -1,0 +1,92 @@
+name: Test & Deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: deploy
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      # --ignore-scripts skips the postinstall that downloads Chrome (~170 MB).
+      # The suite stubs Puppeteer, so CI never needs a browser.
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - run: npm test
+
+  deploy:
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Connect to tailnet
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          version: latest
+
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      - name: Add known hosts
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.DEPLOY_KNOWN_HOSTS }}" >> ~/.ssh/known_hosts
+
+      - name: Pull and restart
+        run: |
+          ssh -o StrictHostKeyChecking=yes "${{ secrets.DEPLOY_SERVER }}" "
+            set -e
+            cd '${{ secrets.DEPLOY_PATH }}'
+            git pull --ff-only origin main
+            npm install --no-audit --no-fund
+            ${{ secrets.DEPLOY_RESTART }}
+          "
+
+      - name: Healthcheck
+        run: |
+          for i in $(seq 1 15); do
+            body=$(curl -sf --max-time 5 https://click.grj.se/health) || { sleep 2; continue; }
+            # A 200 is not enough: the browser check is what went missing last time.
+            if echo "$body" | grep -q '"browser":"ok"'; then
+              echo "Healthcheck OK"
+              echo "$body"
+              exit 0
+            fi
+            echo "$body"
+            sleep 2
+          done
+          echo "Healthcheck failed"
+          exit 1
+
+      - name: Smoke test — PNG
+        run: |
+          out=$(mktemp)
+          status=$(curl -s -o "$out" -w "%{http_code}" --max-time 60 \
+            "https://click.grj.se/shot?url=https://example.com")
+          [ "$status" = "200" ] || { echo "HTTP $status"; cat "$out"; exit 1; }
+          file "$out" | grep -q "PNG image data" || { echo "not a PNG:"; file "$out"; exit 1; }
+          echo "PNG OK ($(wc -c < "$out") bytes)"
+
+      - name: Smoke test — ZIP
+        run: |
+          # This endpoint was silently broken for months; a green deploy must prove it.
+          out=$(mktemp --suffix=.zip)
+          status=$(curl -s -o "$out" -w "%{http_code}" --max-time 120 \
+            "https://click.grj.se/shot/all?url=https://example.com")
+          [ "$status" = "200" ] || { echo "HTTP $status"; cat "$out"; exit 1; }
+          unzip -t "$out" > /dev/null || { echo "corrupt ZIP"; exit 1; }
+          echo "ZIP OK ($(unzip -l "$out" | tail -1))"
