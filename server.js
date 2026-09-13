@@ -645,63 +645,45 @@ app.get("/auth/me", (req, res) => {
   res.json({ email: req.session.email, recent: recent.list(req.session.email) });
 });
 
-// Hur länge svaret får vänta på Resend. Vi väntar in utskicket för att kunna
-// säga om det gick — tyst misslyckande är den felklass som redan kostat den här
-// tjänsten fyra dygns nedtid. Men ett mejlfel får aldrig påverka statuskoden:
-// bilden är färdig och ska ut oavsett.
-const MAIL_TIMEOUT_MS = 6000;
-
-const MAIL_OFF = "off";
-const MAIL_SENT = "sent";
-const MAIL_FAILED = "failed";
-
-// Mottagaren kommer från sessionen, som i sin tur kontrollerats mot allowlisten
-// vid varje förfrågan. Aldrig från query-parametrar — det vore ett öppet spamrelä
-// som skickar från en verifierad domän.
-// Sparar bilderna i den synkade katalogen och mejlar dem. Båda är sido-effekter
-// av en redan färdig skärmdump och får aldrig påverka svaret.
-async function deliverToOwner(session, url, files, variantKey) {
-  if (!session) return { mail: MAIL_OFF, saved: "off" };
-  // Minnet är en bekvämlighet — det får aldrig kosta en skärmdump.
+// Inloggad sparas bilden bara till den synkade katalogen. Den mejlas inte och
+// skickas inte ner i webbläsaren — tre kopior av samma bild var två för många.
+// Mailern finns kvar, men bara för inloggningskoderna.
+async function saveForOwner(session, url, files, variantKey) {
+  if (!session) return null;
   try {
     recent.record(session.email, { url, variant: variantKey });
   } catch (err) {
     console.error("[recent]", err.message);
   }
   const saved = await storage.saveShots(files);
-  const mail = await mailShots(
-    session,
-    url,
-    files.map((f) => mailer.buildAttachment(f.bytes, f.filename))
-  );
-  return { mail, saved };
+  return { saved, files: files.map((f) => f.filename) };
 }
 
-async function mailShots(session, url, attachments) {
-  if (!session || !mailer.isConfigured()) return MAIL_OFF;
-  const label = attachments.length > 1 ? `${attachments.length} format` : attachments[0].filename;
-  // Timern måste rensas explicit — Promise.race avbryter inte förloraren, så utan
-  // clearTimeout lämnar varje skärmdump en timer hängande i sex sekunder.
-  let timer;
-  try {
-    await Promise.race([
-      mailer.send({
-        to: session.email,
-        subject: `Screenshot: ${url}`,
-        text: `${url}\n\n${label}`,
-        attachments,
-      }),
-      new Promise((_, reject) => {
-        timer = setTimeout(() => reject(new Error("mejlet tog för lång tid")), MAIL_TIMEOUT_MS);
-      }),
-    ]);
-    return MAIL_SENT;
-  } catch (err) {
-    console.error("[mail]", err.message);
-    return MAIL_FAILED;
-  } finally {
-    clearTimeout(timer);
+// Bookmarklets navigerar hit, så ett rått JSON-svar vore en dålig upplevelse.
+// Ett fetch-anrop från app.js vill däremot ha JSON. Accept avgör.
+function sendConfirmation(req, res, result) {
+  const ok = result.saved === "saved";
+  const wantsHtml = String(req.headers.accept || "").includes("text/html");
+
+  if (!wantsHtml) {
+    return res.status(ok ? 200 : 500).json({
+      saved: ok,
+      files: result.files,
+      error: ok ? undefined : "kunde inte spara",
+    });
   }
+
+  const list = result.files.map((f) => `<li>${escapeHtml(f)}</li>`).join("");
+  res.status(ok ? 200 : 500).send(`<!DOCTYPE html>
+<html lang="sv"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${ok ? "Sparad" : "Kunde inte spara"} · Click</title><style>${STYLE}
+  ul{list-style:none;font-size:0.85rem;color:#aaa;margin-top:0.5rem}</style></head>
+<body><main class="container">
+  <h1><span style="font-size:4rem" aria-hidden="true">${ok ? "☁️" : "⚠️"}</span><br>${ok ? "Sparad" : "Kunde inte spara"}</h1>
+  <ul>${list}</ul>
+  <nav style="margin-top:2rem"><a href="/">← Till Click</a></nav>
+</main></body></html>`);
 }
 
 // --- Routes ---
@@ -729,20 +711,17 @@ for (const key of VARIANT_KEYS) {
       // istället för att bygga ett eget. Ett ställe, inga kopior som glider isär.
       const filename = shotFilename(url, v.suffix, timestamp());
 
-      // Samma bytes till svar, fil och bilaga — aldrig två fångster.
-      const delivery = await deliverToOwner(
-        req.session,
-        url,
-        [{ filename, bytes: screenshot }],
-        key
-      );
       auth.maybeRenew(req, res);
+
+      const result = await saveForOwner(req.session, url, [{ filename, bytes: screenshot }], key);
+      res.set("X-Click-Saved", result ? result.saved : "off");
+      // Bara när sparningen faktiskt lyckades hålls bilden tillbaka. Gick den inte
+      // hem måste bilden ut i webbläsaren i stället — annars är dumpen helt borta.
+      if (result && result.saved === "saved") return sendConfirmation(req, res, result);
 
       const disposition = req.query.dl !== undefined ? "attachment" : "inline";
       res.set("Content-Type", "image/png");
       res.set("Content-Disposition", `${disposition}; filename="${filename}"`);
-      res.set("X-Click-Mail", delivery.mail);
-      res.set("X-Click-Saved", delivery.saved);
       res.send(screenshot);
     } catch (err) {
       if (err.busy) return res.status(429).send(err.message);
@@ -782,9 +761,10 @@ app.get("/shot/all", rateLimit, async (req, res) => {
     res.set("Content-Type", "application/zip");
     res.set("Content-Disposition", `attachment; filename="${base}-${stamp}.zip"`);
 
-    // Fem separata PNG:er, inte ZIP:en — bättre genom mejlfilter, och det är vad
-    // man vill ha i en synkad mapp. ZIP-strömningen nedan påverkas inte.
-    const delivery = await deliverToOwner(
+    auth.maybeRenew(req, res);
+
+    // Fem separata PNG:er i mappen, inte ZIP:en — det är vad man vill ha där.
+    const result = await saveForOwner(
       req.session,
       url,
       VARIANT_KEYS.map((key, i) => ({
@@ -793,9 +773,8 @@ app.get("/shot/all", rateLimit, async (req, res) => {
       })),
       "all"
     );
-    auth.maybeRenew(req, res);
-    res.set("X-Click-Mail", delivery.mail);
-    res.set("X-Click-Saved", delivery.saved);
+    res.set("X-Click-Saved", result ? result.saved : "off");
+    if (result && result.saved === "saved") return sendConfirmation(req, res, result);
 
     const archive = archiver("zip");
     archive.on("error", (err) => {

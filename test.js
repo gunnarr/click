@@ -1851,168 +1851,6 @@ describe("auth", () => {
 });
 
 // ---------------------------------------------------------------------------
-// 17. Mejlvägen i shot-rutten
-// ---------------------------------------------------------------------------
-
-describe("shot — mejl till inloggad", () => {
-  const { app, _setBrowserInstance, _setLauncher, _setSettleScale } = require("./server");
-  const { _internals } = require("./guard");
-  const mailer = require("./mailer");
-  const auth = require("./auth");
-
-  const HOST = "mailroute-test.example";
-  let server;
-  let baseUrl;
-  let sent;
-
-  const fakePage = () => ({
-    setRequestInterception: async () => {},
-    on: () => {},
-    setViewport: async () => {},
-    goto: async () => {},
-    keyboard: { press: async () => {} },
-    evaluate: async () => false,
-    screenshot: async () => Buffer.from([0x89, 0x50, 0x4e, 0x47]),
-    close: async () => {},
-  });
-
-  beforeEach(async () => {
-    process.env.RESEND_API_KEY = "re_test";
-    process.env.CLICK_SESSION_KEY = Buffer.alloc(32, 3).toString("base64");
-    process.env.CLICK_ALLOWED_EMAILS = "gunnar@gunnar.se";
-    mailer._resetStatus();
-    mailer._setSleep(async () => {});
-    sent = [];
-    mailer._setSender(async (payload) => {
-      sent.push(payload);
-      return { id: "e1" };
-    });
-
-    _setSettleScale(0);
-    _setLauncher(async () => {
-      throw new Error("ingen riktig browser");
-    });
-    _setBrowserInstance({ connected: true, newPage: async () => fakePage() });
-    _internals.dnsCache.set(HOST, { ok: true, expires: Date.now() + 60_000 });
-
-    await new Promise((resolve) => {
-      server = app.listen(0, "127.0.0.1", () => {
-        baseUrl = `http://127.0.0.1:${server.address().port}`;
-        resolve();
-      });
-    });
-  });
-
-  afterEach(async () => {
-    mailer._setSender(null);
-    mailer._setSleep(null);
-    mailer._resetStatus();
-    _setSettleScale(1);
-    _setBrowserInstance(null);
-    _setLauncher(null);
-    delete process.env.RESEND_API_KEY;
-    delete process.env.CLICK_SESSION_KEY;
-    delete process.env.CLICK_ALLOWED_EMAILS;
-    await new Promise((resolve) => server.close(resolve));
-  });
-
-  function shot(cookie) {
-    return new Promise((resolve, reject) => {
-      const opts = cookie ? { headers: { Cookie: cookie } } : {};
-      http
-        .get(`${baseUrl}/shot?url=https://${HOST}/`, opts, (res) => {
-          const chunks = [];
-          res.on("data", (c) => chunks.push(c));
-          res.on("end", () =>
-            resolve({
-              status: res.statusCode,
-              mail: res.headers["x-click-mail"],
-              bytes: Buffer.concat(chunks),
-            })
-          );
-        })
-        .on("error", reject);
-    });
-  }
-
-  const loggedIn = () => `click_sess=${encodeURIComponent(auth.makeSession("gunnar@gunnar.se"))}`;
-
-  it("anonym: inget mejl, oförändrat svar", async () => {
-    const r = await shot(null);
-    assert.equal(r.status, 200);
-    assert.equal(r.mail, "off");
-    assert.equal(sent.length, 0);
-  });
-
-  it("inloggad: mejlet går iväg med bilden bifogad", async () => {
-    const r = await shot(loggedIn());
-    assert.equal(r.status, 200);
-    assert.equal(r.mail, "sent");
-    assert.equal(sent.length, 1);
-    assert.deepEqual(sent[0].to, ["gunnar@gunnar.se"]);
-    assert.equal(sent[0].attachments.length, 1);
-    assert.match(sent[0].attachments[0].filename, /^mailroute-test-example-\d{8}-\d{6}\.png$/);
-  });
-
-  it("bilden i svaret är oförändrad även när den mejlas", async () => {
-    const anon = await shot(null);
-    const auth1 = await shot(loggedIn());
-    assert.deepEqual(auth1.bytes, anon.bytes, "samma bytes till svar och bilaga");
-  });
-
-  it("ETT MEJLFEL FÄLLER INTE SKÄRMDUMPEN", async () => {
-    // Bilden är färdig när mejlet skickas. Ett Resend-avbrott får kosta en header,
-    // aldrig svaret.
-    const logged = console.error;
-    console.error = () => {};
-    try {
-      mailer._setSender(async () => {
-        const err = new Error("nere");
-        err.resend = { name: "invalid_parameter" };
-        throw err;
-      });
-      const r = await shot(loggedIn());
-      assert.equal(r.status, 200, "skärmdumpen ska levereras ändå");
-      assert.equal(r.mail, "failed");
-      assert.ok(r.bytes.length > 0);
-    } finally {
-      console.error = logged;
-    }
-  });
-
-  it("mottagaren kan inte styras från förfrågan", async () => {
-    await new Promise((resolve, reject) => {
-      http
-        .get(
-          `${baseUrl}/shot?url=https://${HOST}/&to=angripare@ond.example`,
-          { headers: { Cookie: loggedIn() } },
-          (res) => {
-            res.resume();
-            res.on("end", resolve);
-          }
-        )
-        .on("error", reject);
-    });
-    assert.deepEqual(sent[0].to, ["gunnar@gunnar.se"], "?to= får aldrig påverka mottagaren");
-  });
-
-  it("utan mejlkonfiguration är vägen bara avstängd", async () => {
-    delete process.env.RESEND_API_KEY;
-    const r = await shot(loggedIn());
-    assert.equal(r.status, 200);
-    assert.equal(r.mail, "off");
-    assert.equal(sent.length, 0);
-  });
-
-  it("en manipulerad sessionscookie ger ingen mejlväg", async () => {
-    const r = await shot("click_sess=v1.abc.def");
-    assert.equal(r.status, 200);
-    assert.equal(r.mail, "off");
-    assert.equal(sent.length, 0);
-  });
-});
-
-// ---------------------------------------------------------------------------
 // 18. takeShots — delad sidladdning för varianter med samma viewport
 // ---------------------------------------------------------------------------
 
@@ -2291,14 +2129,22 @@ describe("shot — sparar bara för inloggad", () => {
     await new Promise((resolve) => server.close(resolve));
   });
 
-  function shot(cookie) {
+  function shot(cookie, extraHeaders = {}) {
     return new Promise((resolve, reject) => {
-      const opts = cookie ? { headers: { Cookie: cookie } } : {};
+      const headers = { ...extraHeaders };
+      if (cookie) headers.Cookie = cookie;
       http
-        .get(`${baseUrl}/shot?url=https://${HOST}/`, opts, (res) => {
-          res.resume();
+        .get(`${baseUrl}/shot?url=https://${HOST}/`, { headers }, (res) => {
+          let data = "";
+          res.setEncoding("binary");
+          res.on("data", (c) => (data += c));
           res.on("end", () =>
-            resolve({ status: res.statusCode, saved: res.headers["x-click-saved"] })
+            resolve({
+              status: res.statusCode,
+              saved: res.headers["x-click-saved"],
+              type: res.headers["content-type"],
+              body: data,
+            })
           );
         })
         .on("error", reject);
@@ -2311,6 +2157,7 @@ describe("shot — sparar bara för inloggad", () => {
     const r = await shot(null);
     assert.equal(r.status, 200);
     assert.equal(r.saved, "off");
+    assert.equal(r.type, "image/png", "anonym får fortfarande bilden");
     assert.deepEqual(fs.readdirSync(dir), [], "katalogen ska vara orörd");
   });
 
@@ -2336,6 +2183,7 @@ describe("shot — sparar bara för inloggad", () => {
       const r = await shot(loggedIn());
       assert.equal(r.status, 200, "bilden ska levereras ändå");
       assert.equal(r.saved, "failed");
+      assert.equal(r.type, "image/png", "misslyckad sparning faller tillbaka på bilden");
     } finally {
       console.error = logged;
     }
@@ -2346,6 +2194,23 @@ describe("shot — sparar bara för inloggad", () => {
     const r = await shot(loggedIn());
     assert.equal(r.status, 200);
     assert.equal(r.saved, "off");
+    assert.equal(r.type, "image/png", "då får man bilden som vanligt");
+  });
+
+  it("inloggad får en bekräftelse i stället för bilden", async () => {
+    const r = await shot(loggedIn());
+    assert.equal(r.status, 200);
+    assert.equal(r.saved, "saved");
+    assert.match(r.type, /application\/json/);
+    const body = JSON.parse(r.body);
+    assert.equal(body.saved, true);
+    assert.match(body.files[0], /^savepath-test-example-\d{8}-\d{6}\.png$/);
+  });
+
+  it("bookmarklet-navigering får en sida, inte rå JSON", async () => {
+    const r = await shot(loggedIn(), { Accept: "text/html,application/xhtml+xml" });
+    assert.match(r.type, /text\/html/);
+    assert.match(r.body, /Sparad/);
   });
 });
 

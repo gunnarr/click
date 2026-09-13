@@ -35,6 +35,17 @@
 
     try {
       const res = await fetch(cfg.shotPath + "?url=" + encodeURIComponent(url));
+
+      // Inloggad sparas bilden bara i den synkade mappen — servern svarar med en
+      // bekräftelse i stället för filen, så inget onödigt går över tunneln.
+      if ((res.headers.get("content-type") || "").includes("application/json")) {
+        const body = await res.json();
+        if (!res.ok || !body.saved) throw new Error(body.error || "kunde inte spara");
+        status.textContent = "Sparad till iCloud: " + body.files.join(", ");
+        button.disabled = false;
+        return;
+      }
+
       if (!res.ok) throw new Error(await res.text());
 
       const href = URL.createObjectURL(await res.blob());
