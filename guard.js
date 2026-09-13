@@ -145,8 +145,17 @@ function clientIp(req) {
 // Mekanismen är densamma överallt; budgetarna är det inte. En Chrome-flik och ett
 // mejl i en människas inkorg kostar olika mycket. Fabriken gör att varje ny gräns
 // ärver clientIp-logiken istället för att återuppfinna den.
-function slidingWindow({ windowMs, max, keyFn = clientIp, message, json = false, hits = new Map() }) {
+function slidingWindow({
+  windowMs,
+  max,
+  keyFn = clientIp,
+  message,
+  json = false,
+  skip = null,
+  hits = new Map(),
+}) {
   const mw = (req, res, next) => {
+    if (skip && skip(req)) return next();
     const key = keyFn(req);
     const now = Date.now();
     const recent = (hits.get(key) || []).filter((t) => now - t < windowMs);
@@ -165,10 +174,14 @@ function slidingWindow({ windowMs, max, keyFn = clientIp, message, json = false,
   return mw;
 }
 
+// Gränsen finns mot anonymt missbruk från internet. En inloggad användare står på
+// allowlisten och är inte den hotbilden. Samtidighetstaket (withSlot) gäller ändå,
+// så maskinen kan fortfarande inte översvämmas oavsett vem som frågar.
 const rateLimit = slidingWindow({
   windowMs: RATE_WINDOW_MS,
   max: RATE_MAX_PER_WINDOW,
   message: "för många förfrågningar — försök igen om en stund",
+  skip: (req) => Boolean(req.session),
   hits: rateHits,
 });
 

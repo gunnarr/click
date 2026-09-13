@@ -2316,3 +2316,76 @@ describe("recent", () => {
     assert.doesNotThrow(() => recent.record(ME, { url: "" }));
   });
 });
+
+// ---------------------------------------------------------------------------
+// 22. rateLimit gäller anonyma, inte inloggade
+// ---------------------------------------------------------------------------
+
+describe("rateLimit — inloggade undantas", () => {
+  const { rateLimit, slidingWindow, _internals } = require("./guard");
+
+  const makeRes = () => ({
+    statusCode: null,
+    set() {
+      return this;
+    },
+    status(code) {
+      this.statusCode = code;
+      return this;
+    },
+    send() {
+      return this;
+    },
+    json() {
+      return this;
+    },
+  });
+
+  const req = (ip, session = null) => ({
+    socket: { remoteAddress: ip },
+    headers: {},
+    session,
+  });
+
+  it("anonym blockeras fortfarande över gränsen", () => {
+    const ip = "203.0.113.90";
+    for (let i = 0; i < _internals.RATE_MAX_PER_WINDOW; i++) {
+      rateLimit(req(ip), makeRes(), () => {});
+    }
+    const res = makeRes();
+    rateLimit(req(ip), res, () => {});
+    assert.equal(res.statusCode, 429);
+  });
+
+  it("INLOGGAD SLÄPPS IGENOM HUR MÅNGA GÅNGER SOM HELST", () => {
+    const ip = "203.0.113.91";
+    const session = { email: "gunnar@gunnar.se" };
+    let passed = 0;
+    for (let i = 0; i < _internals.RATE_MAX_PER_WINDOW * 3; i++) {
+      const res = makeRes();
+      rateLimit(req(ip, session), res, () => passed++);
+      assert.equal(res.statusCode, null, `förfrågan ${i + 1} ska passera`);
+    }
+    assert.equal(passed, _internals.RATE_MAX_PER_WINDOW * 3);
+  });
+
+  it("inloggad förbrukar ingen kvot åt den anonyma från samma IP", () => {
+    const ip = "203.0.113.92";
+    for (let i = 0; i < 50; i++) {
+      rateLimit(req(ip, { email: "gunnar@gunnar.se" }), makeRes(), () => {});
+    }
+    // Samma IP anonymt ska fortfarande ha hela sin budget kvar.
+    const res = makeRes();
+    rateLimit(req(ip), res, () => {});
+    assert.equal(res.statusCode, null);
+  });
+
+  it("skip-funktionen är opt-in — utan den gäller gränsen alla", () => {
+    const mw = slidingWindow({ windowMs: 60_000, max: 1, message: "nej" });
+    const res1 = makeRes();
+    mw(req("198.51.100.7", { email: "x" }), res1, () => {});
+    const res2 = makeRes();
+    mw(req("198.51.100.7", { email: "x" }), res2, () => {});
+    assert.equal(res2.statusCode, 429, "login-gränserna ska inte påverkas");
+  });
+});
