@@ -17,6 +17,7 @@ const {
 } = require("./guard");
 const mailer = require("./mailer");
 const auth = require("./auth");
+const storage = require("./storage");
 const { mailerStatus } = mailer;
 
 const app = express();
@@ -490,6 +491,8 @@ app.get("/health", async (req, res) => {
   // Resend-avbrott skulle annars måla tjänsten röd trots att skärmdumpar fungerar
   // för alla, och blockera varje deploy. Kuma får en egen monitor på det här fältet.
   checks.mailer = mailerStatus();
+  // Samma resonemang som för mailern: rapporteras, men fäller inte tjänsten.
+  checks.storage = storage.storageStatus();
 
   const status = healthy ? "ok" : "error";
   res.status(healthy ? 200 : 503).json({
@@ -622,6 +625,19 @@ const MAIL_FAILED = "failed";
 // Mottagaren kommer från sessionen, som i sin tur kontrollerats mot allowlisten
 // vid varje förfrågan. Aldrig från query-parametrar — det vore ett öppet spamrelä
 // som skickar från en verifierad domän.
+// Sparar bilderna i den synkade katalogen och mejlar dem. Båda är sido-effekter
+// av en redan färdig skärmdump och får aldrig påverka svaret.
+async function deliverToOwner(session, url, files) {
+  if (!session) return { mail: MAIL_OFF, saved: "off" };
+  const saved = await storage.saveShots(files);
+  const mail = await mailShots(
+    session,
+    url,
+    files.map((f) => mailer.buildAttachment(f.bytes, f.filename))
+  );
+  return { mail, saved };
+}
+
 async function mailShots(session, url, attachments) {
   if (!session || !mailer.isConfigured()) return MAIL_OFF;
   const label = attachments.length > 1 ? `${attachments.length} format` : attachments[0].filename;
@@ -672,16 +688,17 @@ for (const key of VARIANT_KEYS) {
       // istället för att bygga ett eget. Ett ställe, inga kopior som glider isär.
       const filename = shotFilename(url, v.suffix, timestamp());
 
-      // Samma bytes till både svaret och bilagan — aldrig två fångster.
-      const mailState = await mailShots(req.session, url, [
-        mailer.buildAttachment(screenshot, filename),
+      // Samma bytes till svar, fil och bilaga — aldrig två fångster.
+      const delivery = await deliverToOwner(req.session, url, [
+        { filename, bytes: screenshot },
       ]);
       auth.maybeRenew(req, res);
 
       const disposition = req.query.dl !== undefined ? "attachment" : "inline";
       res.set("Content-Type", "image/png");
       res.set("Content-Disposition", `${disposition}; filename="${filename}"`);
-      res.set("X-Click-Mail", mailState);
+      res.set("X-Click-Mail", delivery.mail);
+      res.set("X-Click-Saved", delivery.saved);
       res.send(screenshot);
     } catch (err) {
       if (err.busy) return res.status(429).send(err.message);
@@ -719,17 +736,19 @@ app.get("/shot/all", rateLimit, async (req, res) => {
     res.set("Content-Type", "application/zip");
     res.set("Content-Disposition", `attachment; filename="${base}-${stamp}.zip"`);
 
-    // Fem separata PNG:er i mejlet, inte ZIP:en. Bättre leverans genom mejlfilter,
-    // och ZIP-strömningen nedan slipper buffras om för att kunna bifogas.
-    const mailState = await mailShots(
+    // Fem separata PNG:er, inte ZIP:en — bättre genom mejlfilter, och det är vad
+    // man vill ha i en synkad mapp. ZIP-strömningen nedan påverkas inte.
+    const delivery = await deliverToOwner(
       req.session,
       url,
-      VARIANT_KEYS.map((key, i) =>
-        mailer.buildAttachment(shots[i], shotFilename(url, VARIANTS[key].suffix, stamp))
-      )
+      VARIANT_KEYS.map((key, i) => ({
+        filename: shotFilename(url, VARIANTS[key].suffix, stamp),
+        bytes: shots[i],
+      }))
     );
     auth.maybeRenew(req, res);
-    res.set("X-Click-Mail", mailState);
+    res.set("X-Click-Mail", delivery.mail);
+    res.set("X-Click-Saved", delivery.saved);
 
     const archive = archiver("zip");
     archive.on("error", (err) => {

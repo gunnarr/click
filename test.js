@@ -2110,3 +2110,241 @@ describe("takeShots", () => {
     assert.equal(closed, 1);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 19. storage — sparar i den synkade katalogen
+// ---------------------------------------------------------------------------
+
+describe("storage", () => {
+  const storage = require("./storage");
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const nodePath = require("node:path");
+
+  let dir;
+
+  // Riktigt filsystem i en temp-katalog. Att testa en atomisk skrivning mot en
+  // fejkad fs testar ingenting — det är just rename-beteendet som är poängen.
+  beforeEach(() => {
+    dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "click-store-"));
+    process.env.CLICK_SAVE_DIR = dir;
+    storage._resetStatus();
+  });
+
+  afterEach(() => {
+    delete process.env.CLICK_SAVE_DIR;
+    fs.rmSync(dir, { recursive: true, force: true });
+    storage._resetStatus();
+  });
+
+  const png = (n = 4) => Buffer.alloc(n, 0x89);
+
+  it("skriver filen med rätt namn och innehåll", async () => {
+    const out = await storage.saveShots([{ filename: "a-20260913-101010.png", bytes: png() }]);
+    assert.equal(out, "saved");
+    assert.deepEqual(fs.readFileSync(nodePath.join(dir, "a-20260913-101010.png")), png());
+  });
+
+  it("sparar flera filer i ett svep", async () => {
+    await storage.saveShots([
+      { filename: "a.png", bytes: png() },
+      { filename: "b.png", bytes: png() },
+    ]);
+    assert.deepEqual(fs.readdirSync(dir).sort(), ["a.png", "b.png"]);
+  });
+
+  it("lämnar inga temp-filer efter sig", async () => {
+    await storage.saveShots([{ filename: "a.png", bytes: png() }]);
+    assert.equal(fs.readdirSync(dir).filter((f) => f.endsWith(".tmp")).length, 0);
+  });
+
+  it("tar emot Uint8Array lika väl som Buffer", async () => {
+    await storage.saveShots([{ filename: "u.png", bytes: new Uint8Array([1, 2, 3]) }]);
+    assert.deepEqual(fs.readFileSync(nodePath.join(dir, "u.png")), Buffer.from([1, 2, 3]));
+  });
+
+  it("är avstängd utan CLICK_SAVE_DIR och rör då inget", async () => {
+    delete process.env.CLICK_SAVE_DIR;
+    assert.equal(await storage.saveShots([{ filename: "a.png", bytes: png() }]), "off");
+    assert.equal(storage.storageStatus().status, "disabled");
+  });
+
+  it("SKAPAR INTE KATALOGEN — en saknad katalog betyder att iCloud inte är monterad", async () => {
+    process.env.CLICK_SAVE_DIR = nodePath.join(dir, "finns-inte");
+    const logged = console.error;
+    console.error = () => {};
+    try {
+      assert.equal(await storage.saveShots([{ filename: "a.png", bytes: png() }]), "failed");
+    } finally {
+      console.error = logged;
+    }
+    assert.equal(fs.existsSync(nodePath.join(dir, "finns-inte")), false, "ska inte skapas tyst");
+  });
+
+  it("kastar aldrig — anroparen får ett utfall att rapportera", async () => {
+    process.env.CLICK_SAVE_DIR = "/finns/definitivt/inte";
+    const logged = console.error;
+    console.error = () => {};
+    try {
+      await assert.doesNotReject(storage.saveShots([{ filename: "a.png", bytes: png() }]));
+    } finally {
+      console.error = logged;
+    }
+  });
+
+  it("räknar fel i rad och nollställs av en lyckad sparning", async () => {
+    const logged = console.error;
+    console.error = () => {};
+    try {
+      process.env.CLICK_SAVE_DIR = "/finns/inte";
+      await storage.saveShots([{ filename: "a.png", bytes: png() }]);
+      await storage.saveShots([{ filename: "b.png", bytes: png() }]);
+      let s = storage.storageStatus();
+      assert.equal(s.status, "error");
+      assert.equal(s.consecutive_failures, 2);
+
+      process.env.CLICK_SAVE_DIR = dir;
+      await storage.saveShots([{ filename: "c.png", bytes: png() }]);
+      s = storage.storageStatus();
+      assert.equal(s.status, "ok");
+      assert.equal(s.saved_total, 1);
+    } finally {
+      console.error = logged;
+    }
+  });
+
+  it("writeAtomic går via temp och rename i samma katalog", async () => {
+    // Samma katalog krävs: rename är bara atomiskt inom ett filsystem.
+    const target = await storage.writeAtomic(dir, "x.png", png());
+    assert.equal(nodePath.dirname(target), dir);
+    assert.ok(fs.existsSync(target));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 20. Sparning sker bara för inloggad
+// ---------------------------------------------------------------------------
+
+describe("shot — sparar bara för inloggad", () => {
+  const { app, _setBrowserInstance, _setLauncher, _setSettleScale } = require("./server");
+  const { _internals } = require("./guard");
+  const mailer = require("./mailer");
+  const storage = require("./storage");
+  const auth = require("./auth");
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const nodePath = require("node:path");
+
+  const HOST = "savepath-test.example";
+  let server;
+  let baseUrl;
+  let dir;
+
+  const fakePage = () => ({
+    setRequestInterception: async () => {},
+    on: () => {},
+    setViewport: async () => {},
+    goto: async () => {},
+    keyboard: { press: async () => {} },
+    evaluate: async () => false,
+    screenshot: async () => Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+    close: async () => {},
+  });
+
+  beforeEach(async () => {
+    dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "click-route-"));
+    process.env.CLICK_SAVE_DIR = dir;
+    process.env.CLICK_SESSION_KEY = Buffer.alloc(32, 5).toString("base64");
+    process.env.CLICK_ALLOWED_EMAILS = "gunnar@gunnar.se";
+    storage._resetStatus();
+    mailer._resetStatus();
+    mailer._setSleep(async () => {});
+    mailer._setSender(async () => ({ id: "e1" }));
+
+    _setSettleScale(0);
+    _setLauncher(async () => {
+      throw new Error("ingen riktig browser");
+    });
+    _setBrowserInstance({ connected: true, newPage: async () => fakePage() });
+    _internals.dnsCache.set(HOST, { ok: true, expires: Date.now() + 60_000 });
+
+    await new Promise((resolve) => {
+      server = app.listen(0, "127.0.0.1", () => {
+        baseUrl = `http://127.0.0.1:${server.address().port}`;
+        resolve();
+      });
+    });
+  });
+
+  afterEach(async () => {
+    mailer._setSender(null);
+    mailer._setSleep(null);
+    storage._resetStatus();
+    _setSettleScale(1);
+    _setBrowserInstance(null);
+    _setLauncher(null);
+    fs.rmSync(dir, { recursive: true, force: true });
+    delete process.env.CLICK_SAVE_DIR;
+    delete process.env.CLICK_SESSION_KEY;
+    delete process.env.CLICK_ALLOWED_EMAILS;
+    delete process.env.RESEND_API_KEY;
+    await new Promise((resolve) => server.close(resolve));
+  });
+
+  function shot(cookie) {
+    return new Promise((resolve, reject) => {
+      const opts = cookie ? { headers: { Cookie: cookie } } : {};
+      http
+        .get(`${baseUrl}/shot?url=https://${HOST}/`, opts, (res) => {
+          res.resume();
+          res.on("end", () =>
+            resolve({ status: res.statusCode, saved: res.headers["x-click-saved"] })
+          );
+        })
+        .on("error", reject);
+    });
+  }
+
+  const loggedIn = () => `click_sess=${encodeURIComponent(auth.makeSession("gunnar@gunnar.se"))}`;
+
+  it("ANONYM SPARAR INGENTING", async () => {
+    const r = await shot(null);
+    assert.equal(r.status, 200);
+    assert.equal(r.saved, "off");
+    assert.deepEqual(fs.readdirSync(dir), [], "katalogen ska vara orörd");
+  });
+
+  it("inloggad sparar filen i katalogen", async () => {
+    const r = await shot(loggedIn());
+    assert.equal(r.status, 200);
+    assert.equal(r.saved, "saved");
+    const files = fs.readdirSync(dir);
+    assert.equal(files.length, 1);
+    assert.match(files[0], /^savepath-test-example-\d{8}-\d{6}\.png$/);
+  });
+
+  it("en manipulerad cookie räknas inte som inloggad", async () => {
+    await shot("click_sess=v1.abc.def");
+    assert.deepEqual(fs.readdirSync(dir), []);
+  });
+
+  it("EN TRASIG KATALOG FÄLLER INTE SKÄRMDUMPEN", async () => {
+    process.env.CLICK_SAVE_DIR = "/finns/definitivt/inte";
+    const logged = console.error;
+    console.error = () => {};
+    try {
+      const r = await shot(loggedIn());
+      assert.equal(r.status, 200, "bilden ska levereras ändå");
+      assert.equal(r.saved, "failed");
+    } finally {
+      console.error = logged;
+    }
+  });
+
+  it("utan CLICK_SAVE_DIR är sparningen bara avstängd", async () => {
+    delete process.env.CLICK_SAVE_DIR;
+    const r = await shot(loggedIn());
+    assert.equal(r.status, 200);
+    assert.equal(r.saved, "off");
+  });
+});
