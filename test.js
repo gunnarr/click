@@ -913,6 +913,8 @@ describe("takeShot — stänger alltid sina flikar", () => {
       setViewport: async () => {},
       goto: async () => {},
       keyboard: { press: async () => {} },
+    waitForFunction: async () => {},
+      waitForFunction: async () => {},
       evaluate: async () => false,
       setContent: async () => {},
       screenshot: async () => Buffer.from([0x89, 0x50, 0x4e, 0x47]),
@@ -1257,6 +1259,7 @@ describe("Content-Disposition — servern äger filnamnet", () => {
     setViewport: async () => {},
     goto: async () => {},
     keyboard: { press: async () => {} },
+    waitForFunction: async () => {},
     evaluate: async () => false,
     screenshot: async () => Buffer.from([0x89, 0x50, 0x4e, 0x47]),
     close: async () => {},
@@ -1870,6 +1873,8 @@ describe("takeShots", () => {
         state.loads++;
       },
       keyboard: { press: async () => {} },
+    waitForFunction: async () => {},
+      waitForFunction: async () => {},
       evaluate: async () => false,
       setContent: async () => {},
       screenshot: async (opts = {}) => {
@@ -1935,6 +1940,8 @@ describe("takeShots", () => {
         setViewport: async () => {},
         goto: async () => {},
         keyboard: { press: async () => {} },
+    waitForFunction: async () => {},
+      waitForFunction: async () => {},
         evaluate: async () => false,
         screenshot: async () => {
           throw new Error("trasig");
@@ -2084,6 +2091,7 @@ describe("shot — sparar bara för inloggad", () => {
     setViewport: async () => {},
     goto: async () => {},
     keyboard: { press: async () => {} },
+    waitForFunction: async () => {},
     evaluate: async () => false,
     screenshot: async () => Buffer.from([0x89, 0x50, 0x4e, 0x47]),
     close: async () => {},

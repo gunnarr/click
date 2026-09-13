@@ -79,6 +79,17 @@ async function validateTargetUrl(rawUrl) {
   return { ok: true };
 }
 
+// Samtyckesplattformar. Att blockera deras skript är bättre än att städa bort
+// rutan efteråt: flera av dem (Didomi bland andra) renderar om sig när elementet
+// försvinner, så en DOM-städning blir en kapplöpning man förlorar. Laddas skriptet
+// aldrig finns ingen ruta — och sidan blir snabbare på köpet.
+const CMP_HOSTS =
+  /(^|\.)(didomi\.io|privacy-center\.org|cookiebot\.com|cookielaw\.org|onetrust\.com|quantcast\.com|quantserve\.com|usercentrics\.eu|trustarc\.com|sp-prod\.net|summerhamster\.com|iubenda\.com|cookieyes\.com|osano\.com|civiccomputing\.com|termly\.io|cookiehub\.net|consensu\.org)$/i;
+
+function isConsentPlatform(hostname) {
+  return CMP_HOSTS.test(String(hostname || "").toLowerCase());
+}
+
 // Sätts på page-objektet när en respons faktiskt kom från en intern IP.
 const REBOUND = Symbol("clickReboundTo");
 
@@ -99,6 +110,7 @@ async function guardPage(page) {
         return await req.continue();
       }
       if (u.protocol !== "http:" && u.protocol !== "https:") return await req.abort();
+      if (isConsentPlatform(u.hostname)) return await req.abort("blockedbyclient");
       if (await hostnameIsPublic(u.hostname)) return await req.continue();
       return await req.abort("blockedbyclient");
     } catch {
@@ -238,6 +250,7 @@ module.exports = {
   hostnameIsPublic,
   validateTargetUrl,
   guardPage,
+  isConsentPlatform,
   assertNoPrivateAccess,
   clientIp,
   publicMessage,

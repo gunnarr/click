@@ -220,30 +220,158 @@ function shotFilename(url, suffix, stamp) {
   return `${urlToFilename(url)}${suffix}-${stamp}.png`;
 }
 
+// Kända samtyckesplattformar. Att träffa dem på id är långt säkrare än att gissa
+// på storlek, och de täcker de flesta sajter.
+const CMP_SELECTORS = [
+  "#onetrust-consent-sdk",
+  "#onetrust-banner-sdk",
+  "#CybotCookiebotDialog",
+  "#CybotCookiebotDialogBodyUnderlay",
+  ".qc-cmp2-container",
+  ".qc-cmp-cleanslate",
+  "#didomi-host",
+  "#didomi-popup",
+  ".didomi-popup-backdrop",
+  "[id*='didomi-notice']",
+  "#usercentrics-root",
+  "#truste-consent-track",
+  "#cookie-law-info-bar",
+  "#cmpwrapper",
+  "[id^='sp_message_container']",
+  "[class*='cookie-consent']",
+  "[class*='cookieConsent']",
+  "[id*='cookie-banner']",
+  "[aria-label*='cookie' i]",
+  "[aria-label*='kakor' i]",
+];
+
 async function dismissPopups(page) {
   await page.keyboard.press("Escape");
   await settle(100);
 
   const hasCanvas = await page.evaluate(() => document.querySelector("canvas") !== null);
-  if (!hasCanvas) {
-    await page.evaluate(() => {
-      for (const el of document.querySelectorAll("*")) {
-        const s = getComputedStyle(el);
-        if (
-          (s.position === "fixed" || s.position === "absolute") &&
-          parseInt(s.zIndex, 10) > 100 &&
-          el.offsetWidth > window.innerWidth * 0.3 &&
-          el.offsetHeight > window.innerHeight * 0.3
-        ) el.remove();
-      }
-      for (const el of document.querySelectorAll(
-        '[class*="backdrop"],[class*="Backdrop"],[class*="overlay"],[class*="Overlay"]'
-      )) el.remove();
-      document.body.style.overflow = "auto";
-      document.documentElement.style.overflow = "auto";
-    });
+  if (hasCanvas) {
+    // Kartor och WebGL ritar i canvas; overlay-städning där tar bort själva innehållet.
+    await settle(100);
+    return { removed: 0, cookie: 0 };
   }
-  await settle(100);
+
+  const pass = () => page.evaluate((selectors) => {
+    let removed = 0;
+    let cookie = 0;
+
+    const drop = (el) => {
+      if (el && el.parentNode && el !== document.body && el !== document.documentElement) {
+        el.remove();
+        return true;
+      }
+      return false;
+    };
+
+    // 1. Kända plattformar, på id.
+    for (const sel of selectors) {
+      for (const el of document.querySelectorAll(sel)) {
+        if (drop(el)) {
+          removed++;
+          cookie++;
+        }
+      }
+    }
+
+    // 2. Okända dialoger: hitta texten, gå uppåt till närmaste positionerade
+    //    förälder och kasta den. Att leta efter en positionerad ruta direkt
+    //    fungerar inte — själva dialogen är ofta position:relative inuti ett
+    //    fixed omslag, och z-index kan lika gärna vara 40 som 4000.
+    const WORDS = /(cookie|kakor|samtycke|consent|gdpr|integritetspolicy)/i;
+
+    const ownText = (el) =>
+      Array.from(el.childNodes)
+        .filter((n) => n.nodeType === 3)
+        .map((n) => n.textContent)
+        .join("");
+
+    const isPage = (el) =>
+      el === document.body ||
+      el === document.documentElement ||
+      Boolean(el.querySelector("main,article,h1,nav"));
+
+    const containerFor = (el) => {
+      let node = el;
+      for (let i = 0; i < 8 && node && node !== document.body; i++) {
+        const cs = getComputedStyle(node);
+        const positioned = cs.position === "fixed" || cs.position === "sticky" || cs.position === "absolute";
+        const dialog =
+          node.tagName === "DIALOG" ||
+          node.getAttribute("role") === "dialog" ||
+          node.getAttribute("aria-modal") === "true";
+        if ((positioned || dialog) && !isPage(node)) return node;
+        node = node.parentElement;
+      }
+      return null;
+    };
+
+    const targets = new Set();
+    for (const el of document.querySelectorAll("h1,h2,h3,p,span,div,button")) {
+      if (!WORDS.test(ownText(el))) continue;
+      const box = containerFor(el);
+      // Kravet på en knapp skiljer en samtyckesruta från en artikel om kakor.
+      if (box && box.querySelector("button,a[role='button'],input[type='submit']")) {
+        targets.add(box);
+      }
+    }
+    for (const box of targets) {
+      if ([...targets].some((other) => other !== box && other.contains(box))) continue;
+      if (drop(box)) {
+        removed++;
+        cookie++;
+      }
+    }
+
+    // 3. Stora overlays utan cookie-text: modaler, nyhetsbrevsrutor, betalväggar.
+    for (const el of document.querySelectorAll("*")) {
+      const cs = getComputedStyle(el);
+      if (cs.position !== "fixed" && cs.position !== "absolute") continue;
+      if (!(parseInt(cs.zIndex, 10) > 100)) continue;
+      if (el.offsetWidth > innerWidth * 0.3 && el.offsetHeight > innerHeight * 0.3) {
+        if (drop(el)) removed++;
+      }
+    }
+
+    // 4. Kvarvarande mörkläggning och scrollås.
+    for (const el of document.querySelectorAll(
+      "[class*='backdrop'],[class*='Backdrop'],[class*='overlay'],[class*='Overlay']"
+    )) {
+      if (drop(el)) removed++;
+    }
+    document.body.style.overflow = "auto";
+    document.documentElement.style.overflow = "auto";
+
+    return { removed, cookie };
+  }, CMP_SELECTORS);
+
+  const first = await pass();
+
+  // Många plattformar (Didomi bland andra) injicerar rutan efter att nätverket
+  // lagt sig. Att gissa på en fast paus fungerar inte — i stället väntar vi in
+  // den, med tak. Dyker den upp efter 80 ms fortsätter vi efter 80 ms; finns
+  // ingen alls kostar det taket och inget mer.
+  await page
+    .waitForFunction(
+      () =>
+        [...document.querySelectorAll("div,section,aside,dialog")].some((el) => {
+          const cs = getComputedStyle(el);
+          if (cs.position !== "fixed" && cs.position !== "sticky") return false;
+          const r = el.getBoundingClientRect();
+          if (r.width < 200 || r.height < 60) return false;
+          return /(cookie|kakor|samtycke|consent)/i.test(el.innerText || "");
+        }),
+      { timeout: 350, polling: 70 }
+    )
+    .catch(() => {});
+
+  const second = await pass();
+  await settle(50);
+  return { removed: first.removed + second.removed, cookie: first.cookie + second.cookie };
 }
 
 // Varje flik måste stängas även när goto/screenshot kastar — browsern är persistent,
@@ -812,6 +940,7 @@ module.exports = {
   getBrowser,
   takeShot,
   takeShots,
+  dismissPopups,
   urlToFilename,
   timestamp,
   shotFilename,
