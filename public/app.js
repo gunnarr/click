@@ -60,4 +60,23 @@
 
     button.disabled = false;
   };
+
+  // Ett tryck från senaste-listan: variantens sida öppnas med ?u=<url> och
+  // dumpen startar direkt. Parametern städas ur adressfältet så en omladdning
+  // inte kör om den av misstag.
+  const prefill = new URLSearchParams(location.search).get("u");
+  if (prefill) {
+    input.value = prefill;
+    history.replaceState(null, "", location.pathname);
+    form.requestSubmit ? form.requestSubmit() : form.dispatchEvent(new Event("submit"));
+  }
+
+  const logout = document.getElementById("logout");
+  if (logout) {
+    logout.onclick = async (event) => {
+      event.preventDefault();
+      await fetch("/auth/logout", { method: "POST" });
+      location.reload();
+    };
+  }
 })();

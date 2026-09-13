@@ -2348,3 +2348,106 @@ describe("shot — sparar bara för inloggad", () => {
     assert.equal(r.saved, "off");
   });
 });
+
+// ---------------------------------------------------------------------------
+// 21. recent — minnet av senaste URL:er
+// ---------------------------------------------------------------------------
+
+describe("recent", () => {
+  const recent = require("./recent");
+  const fs = require("node:fs");
+  const os = require("node:os");
+  const nodePath = require("node:path");
+
+  const ME = "gunnar@gunnar.se";
+  let dir;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(nodePath.join(os.tmpdir(), "click-recent-"));
+    process.env.CLICK_STATE_FILE = nodePath.join(dir, "recent.json");
+    recent._reset();
+  });
+
+  afterEach(async () => {
+    await recent._flush();
+    delete process.env.CLICK_STATE_FILE;
+    fs.rmSync(dir, { recursive: true, force: true });
+    recent._reset();
+  });
+
+  it("börjar tomt", () => {
+    assert.deepEqual(recent.list(ME), []);
+  });
+
+  it("minns senaste först", () => {
+    recent.record(ME, { url: "https://a.se", variant: "desktop" });
+    recent.record(ME, { url: "https://b.se", variant: "mobile" });
+    assert.deepEqual(recent.list(ME).map((e) => e.url), ["https://b.se", "https://a.se"]);
+  });
+
+  it("minns varianten — telefonen ska upprepa samma format", () => {
+    recent.record(ME, { url: "https://a.se", variant: "tablet" });
+    assert.equal(recent.list(ME)[0].variant, "tablet");
+  });
+
+  it("dubbletter flyttas upp istället för att läggas till", () => {
+    recent.record(ME, { url: "https://a.se", variant: "desktop" });
+    recent.record(ME, { url: "https://b.se", variant: "desktop" });
+    recent.record(ME, { url: "https://a.se", variant: "big" });
+    const l = recent.list(ME);
+    assert.equal(l.length, 2);
+    assert.equal(l[0].url, "https://a.se");
+    assert.equal(l[0].variant, "big", "senaste varianten vinner");
+  });
+
+  it("håller sig till fem poster", () => {
+    for (let i = 0; i < 9; i++) recent.record(ME, { url: `https://s${i}.se`, variant: "desktop" });
+    assert.equal(recent.list(ME).length, recent.MAX_ENTRIES);
+    assert.equal(recent.list(ME)[0].url, "https://s8.se");
+  });
+
+  it("håller isär användare", () => {
+    recent.record(ME, { url: "https://min.se", variant: "desktop" });
+    recent.record("annan@example.se", { url: "https://annans.se", variant: "desktop" });
+    assert.deepEqual(recent.list(ME).map((e) => e.url), ["https://min.se"]);
+  });
+
+  it("lagrar inte adressen i klartext", async () => {
+    recent.record(ME, { url: "https://a.se", variant: "desktop" });
+    await recent._flush();
+    const raw = fs.readFileSync(process.env.CLICK_STATE_FILE, "utf8");
+    assert.ok(!raw.includes(ME), "mejladressen ska inte ligga bredvid surfhistoriken");
+    assert.ok(raw.includes("https://a.se"));
+  });
+
+  it("ÖVERLEVER OMSTART", async () => {
+    // Varje deploy startar om tjänsten. Utan persistens vore funktionen värdelös.
+    recent.record(ME, { url: "https://kvar.se", variant: "mobile" });
+    await recent._flush();
+    recent._reset(); // som en ny process
+    assert.equal(recent.list(ME)[0].url, "https://kvar.se");
+  });
+
+  it("en trasig fil ger tom lista i stället för krasch", () => {
+    fs.writeFileSync(process.env.CLICK_STATE_FILE, "{ inte json");
+    recent._reset();
+    assert.deepEqual(recent.list(ME), []);
+  });
+
+  it("en fil med fel form ger tom lista", () => {
+    fs.writeFileSync(process.env.CLICK_STATE_FILE, '["array istället för objekt"]');
+    recent._reset();
+    assert.deepEqual(recent.list(ME), []);
+  });
+
+  it("avvisar orimligt långa URL:er", () => {
+    recent.record(ME, { url: "https://a.se/" + "x".repeat(3000), variant: "desktop" });
+    assert.deepEqual(recent.list(ME), []);
+  });
+
+  it("tål saknad e-post och saknad url", () => {
+    assert.deepEqual(recent.list(null), []);
+    assert.doesNotThrow(() => recent.record(null, { url: "https://a.se" }));
+    assert.doesNotThrow(() => recent.record(ME, { url: "" }));
+  });
+});

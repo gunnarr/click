@@ -16,3 +16,6 @@ CLAUDE.md
 
 # Testbilder som hamnar i projektroten (public/og.png påverkas inte)
 /*.png
+
+# Tillståndsfil för senaste-listan
+data/

@@ -18,6 +18,7 @@ const {
 const mailer = require("./mailer");
 const auth = require("./auth");
 const storage = require("./storage");
+const recent = require("./recent");
 const { mailerStatus } = mailer;
 
 const app = express();
@@ -406,7 +407,38 @@ function pageSpec(key) {
   };
 }
 
-function renderPage(key) {
+const escapeHtml = (str) =>
+  String(str).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+// Ett tryck: länken går till variantens egen sida med URL:en förifylld, och
+// app.js kör igång dumpen direkt. Varianten följer med, eftersom poängen är att
+// upprepa samma format som togs på laptopen — en telefon kan inte gissa det.
+function recentBlock(session, entries) {
+  if (!session) return "";
+  const header = `<div style="margin-bottom:1.5rem;text-align:left">
+      <p style="color:#aaa;font-size:0.8rem;margin-bottom:0.5rem">Inloggad som ${escapeHtml(session.email)} · <a href="#" id="logout" style="color:#888">Logga ut</a></p>`;
+  if (!entries.length) return `${header}</div>`;
+
+  const links = entries
+    .map((e) => {
+      const spec = e.variant === "all" ? pageSpec("all") : pageSpec(e.variant in VARIANTS ? e.variant : "desktop");
+      let host = e.url;
+      try {
+        host = new URL(e.url).hostname.replace(/^www\./, "");
+      } catch {
+        /* behåll råa strängen */
+      }
+      return `<a href="${spec.path}?u=${encodeURIComponent(e.url)}" title="${escapeHtml(e.url)}" style="display:inline-block;padding:0.35rem 0.7rem;margin:0 0.35rem 0.35rem 0;background:#16213e;border:1px solid #333;border-radius:6px;color:#eee;text-decoration:none;font-size:0.85rem">${spec.emoji} ${escapeHtml(host)}</a>`;
+    })
+    .join("");
+
+  return `${header}
+      <p style="color:#aaa;font-size:0.8rem;margin-bottom:0.4rem">Senaste:</p>
+      <div>${links}</div>
+    </div>`;
+}
+
+function renderPage(key, session = null, entries = []) {
   const p = pageSpec(key);
   const url = `${BASE_URL}${p.path}`;
   // Escapa < så att ett värde aldrig kan stänga script-taggen tidigt.
@@ -438,6 +470,7 @@ function renderPage(key) {
   <main class="container">
     <h1><span style="font-size:4rem" aria-hidden="true">${p.emoji}</span><br>${p.title}</h1>
     <nav aria-label="Varianter">${navLinks(key)}</nav>
+    ${recentBlock(session, entries)}
     <div style="margin-top:1.5rem;margin-bottom:1.5rem">
       <p style="color:#aaa;margin-bottom:0.5rem;font-size:0.85rem">Dra till bokmärkesfältet:</p>
       <a href="javascript:void(window.location='${BASE_URL}${p.shotPath}?${p.dl ? "dl&" : ""}url='+encodeURIComponent(location.href))" style="display:inline-block;padding:0.4rem 0.8rem;background:#d03050;color:#fff;border-radius:6px;text-decoration:none;font-weight:500;font-size:0.85rem" title="Bookmarklet: ${p.bookmarkletHint}">${p.title}</a>
@@ -609,7 +642,7 @@ app.post("/auth/logout", (req, res) => {
 
 app.get("/auth/me", (req, res) => {
   if (!req.session) return res.status(401).json({ error: "ej inloggad" });
-  res.json({ email: req.session.email });
+  res.json({ email: req.session.email, recent: recent.list(req.session.email) });
 });
 
 // Hur länge svaret får vänta på Resend. Vi väntar in utskicket för att kunna
@@ -627,8 +660,14 @@ const MAIL_FAILED = "failed";
 // som skickar från en verifierad domän.
 // Sparar bilderna i den synkade katalogen och mejlar dem. Båda är sido-effekter
 // av en redan färdig skärmdump och får aldrig påverka svaret.
-async function deliverToOwner(session, url, files) {
+async function deliverToOwner(session, url, files, variantKey) {
   if (!session) return { mail: MAIL_OFF, saved: "off" };
+  // Minnet är en bekvämlighet — det får aldrig kosta en skärmdump.
+  try {
+    recent.record(session.email, { url, variant: variantKey });
+  } catch (err) {
+    console.error("[recent]", err.message);
+  }
   const saved = await storage.saveShots(files);
   const mail = await mailShots(
     session,
@@ -670,7 +709,9 @@ async function mailShots(session, url, attachments) {
 for (const key of VARIANT_KEYS) {
   const v = VARIANTS[key];
 
-  app.get(v.path, (req, res) => res.send(renderPage(key)));
+  app.get(v.path, (req, res) =>
+    res.send(renderPage(key, req.session, req.session ? recent.list(req.session.email) : []))
+  );
 
   app.get(v.shotPath, rateLimit, async (req, res) => {
     const url = req.query.url;
@@ -689,9 +730,12 @@ for (const key of VARIANT_KEYS) {
       const filename = shotFilename(url, v.suffix, timestamp());
 
       // Samma bytes till svar, fil och bilaga — aldrig två fångster.
-      const delivery = await deliverToOwner(req.session, url, [
-        { filename, bytes: screenshot },
-      ]);
+      const delivery = await deliverToOwner(
+        req.session,
+        url,
+        [{ filename, bytes: screenshot }],
+        key
+      );
       auth.maybeRenew(req, res);
 
       const disposition = req.query.dl !== undefined ? "attachment" : "inline";
@@ -709,7 +753,9 @@ for (const key of VARIANT_KEYS) {
   });
 }
 
-app.get("/all", (req, res) => res.send(renderPage("all")));
+app.get("/all", (req, res) =>
+  res.send(renderPage("all", req.session, req.session ? recent.list(req.session.email) : []))
+);
 
 app.get("/shot/all", rateLimit, async (req, res) => {
   const url = req.query.url;
@@ -744,7 +790,8 @@ app.get("/shot/all", rateLimit, async (req, res) => {
       VARIANT_KEYS.map((key, i) => ({
         filename: shotFilename(url, VARIANTS[key].suffix, stamp),
         bytes: shots[i],
-      }))
+      })),
+      "all"
     );
     auth.maybeRenew(req, res);
     res.set("X-Click-Mail", delivery.mail);
